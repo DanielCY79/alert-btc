@@ -75,6 +75,7 @@ public class BinanceApi {
                 BinanceKlineDTO tmpDTO = new BinanceKlineDTO();
                 JSONArray tmpArr = JSON.parseArray(object.toString());
                 tmpDTO.setSymbol(reqDTO.getSymbol());
+                tmpDTO.setInterval(reqDTO.getInterval());
                 tmpDTO.setStartTime(Long.parseLong(tmpArr.get(0).toString()));
                 tmpDTO.setHigh(tmpArr.get(2).toString());
                 tmpDTO.setLow(tmpArr.get(3).toString());

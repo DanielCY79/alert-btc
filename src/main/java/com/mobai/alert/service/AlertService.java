@@ -18,6 +18,7 @@ import java.util.stream.Collectors;
 @Service
 public class AlertService {
 
+    private static final String TARGET_SYMBOL = "BTCUSDT";
     private static final DateTimeFormatter LOG_TIME_FORMATTER = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
 
     private final AlertSymbolCacheService alertSymbolCacheService;
@@ -46,7 +47,14 @@ public class AlertService {
             return;
         }
 
-        processSymbols(symbolsDTO.getSymbols(), 4);
+        List<BinanceSymbolsDetailDTO> targetSymbols = symbolsDTO.getSymbols().stream()
+                .filter(symbol -> TARGET_SYMBOL.equals(symbol.getSymbol()))
+                .collect(Collectors.toList());
+        if (CollectionUtils.isEmpty(targetSymbols)) {
+            return;
+        }
+
+        processSymbols(targetSymbols, 1);
         System.out.println("Monitoring finished " + LOG_TIME_FORMATTER.format(LocalDateTime.now()));
     }
 
