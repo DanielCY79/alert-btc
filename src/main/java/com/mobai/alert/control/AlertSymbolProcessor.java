@@ -25,9 +25,9 @@ import java.util.concurrent.ConcurrentHashMap;
 public class AlertSymbolProcessor {
 
     private static final Logger log = LoggerFactory.getLogger(AlertSymbolProcessor.class);
-    private static final String TARGET_SYMBOL = "BTCUSDT";
-    private static final String LONG_BREAKOUT_KEY = TARGET_SYMBOL + ":LONG";
-    private static final String SHORT_BREAKOUT_KEY = TARGET_SYMBOL + ":SHORT";
+
+    @Value("${monitoring.target-symbol:BTCUSDT}")
+    private String targetSymbol;
 
     @Value("${monitoring.kline.interval:15m}")
     private String klineInterval;
@@ -64,11 +64,11 @@ public class AlertSymbolProcessor {
 
         List<BinanceKlineDTO> klines = loadRecentKlines(symbolDTO.getSymbol());
         if (CollectionUtils.isEmpty(klines) || klines.size() < 3) {
-            log.warn("K 线数据不足，无法评估信号，symbol={}，实际K线数量={}", symbolDTO.getSymbol(), klines == null ? 0 : klines.size());
+            log.warn("K 线数据不足，无法评估信号，symbol={}，实际 K 线数量={}", symbolDTO.getSymbol(), klines == null ? 0 : klines.size());
             return;
         }
 
-        log.info("K 线加载完成，symbol={}，获取到 {} 根K线，最新收盘时间={}",
+        log.info("K 线加载完成，symbol={}，获取到 {} 根 K 线，最新收盘时间={}",
                 symbolDTO.getSymbol(),
                 klines.size(),
                 klines.get(klines.size() - 1).getEndTime());
@@ -81,26 +81,26 @@ public class AlertSymbolProcessor {
         }
 
         boolean breakoutTriggered = alertRuleEvaluator.evaluateTrendBreakout(klines)
-                .map(signal -> recordBreakout(signal, LONG_BREAKOUT_KEY, SHORT_BREAKOUT_KEY))
+                .map(signal -> recordBreakout(signal, longBreakoutKey(), shortBreakoutKey()))
                 .orElse(false);
         if (breakoutTriggered) {
             return;
         }
 
         breakoutTriggered = alertRuleEvaluator.evaluateTrendBreakdown(klines)
-                .map(signal -> recordBreakout(signal, SHORT_BREAKOUT_KEY, LONG_BREAKOUT_KEY))
+                .map(signal -> recordBreakout(signal, shortBreakoutKey(), longBreakoutKey()))
                 .orElse(false);
         if (breakoutTriggered) {
             return;
         }
 
-        BreakoutRecord longBreakout = breakoutRecords.get(LONG_BREAKOUT_KEY);
+        BreakoutRecord longBreakout = breakoutRecords.get(longBreakoutKey());
         if (longBreakout != null
                 && sendIfPresent(alertRuleEvaluator.evaluateBreakoutPullback(klines, longBreakout.breakoutLevel(), longBreakout.targetPrice(), true))) {
             return;
         }
 
-        BreakoutRecord shortBreakout = breakoutRecords.get(SHORT_BREAKOUT_KEY);
+        BreakoutRecord shortBreakout = breakoutRecords.get(shortBreakoutKey());
         if (shortBreakout != null) {
             sendIfPresent(alertRuleEvaluator.evaluateBreakoutPullback(klines, shortBreakout.breakoutLevel(), shortBreakout.targetPrice(), false));
         }
@@ -119,7 +119,7 @@ public class AlertSymbolProcessor {
 
     private boolean shouldSkip(BinanceSymbolsDetailDTO symbolDTO) {
         String symbol = symbolDTO.getSymbol();
-        if (!StringUtils.hasText(symbol) || !Objects.equals(symbol, TARGET_SYMBOL)) {
+        if (!StringUtils.hasText(symbol) || !Objects.equals(symbol, targetSymbol)) {
             return true;
         }
         return !Objects.equals(symbolDTO.getStatus(), "TRADING");
@@ -158,5 +158,13 @@ public class AlertSymbolProcessor {
         breakoutRecords.remove(oppositeKey);
         log.info("突破记录已更新，当前记录键={}，已清理对向记录键={}", recordKey, oppositeKey);
         return true;
+    }
+
+    private String longBreakoutKey() {
+        return targetSymbol + ":LONG";
+    }
+
+    private String shortBreakoutKey() {
+        return targetSymbol + ":SHORT";
     }
 }

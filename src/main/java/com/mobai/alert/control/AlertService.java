@@ -5,6 +5,7 @@ import com.mobai.alert.access.dto.BinanceSymbolsDetailDTO;
 import com.mobai.alert.access.market.AlertSymbolCacheService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
@@ -24,8 +25,10 @@ import java.util.stream.Collectors;
 public class AlertService {
 
     private static final Logger log = LoggerFactory.getLogger(AlertService.class);
-    private static final String TARGET_SYMBOL = "BTCUSDT";
     private static final DateTimeFormatter LOG_TIME_FORMATTER = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
+
+    @Value("${monitoring.target-symbol:BTCUSDT}")
+    private String targetSymbol;
 
     private final AlertSymbolCacheService alertSymbolCacheService;
     private final AlertSymbolProcessor alertSymbolProcessor;
@@ -35,9 +38,12 @@ public class AlertService {
         this.alertSymbolProcessor = alertSymbolProcessor;
     }
 
-    @Scheduled(fixedRate = 60000)
+    @Scheduled(
+            fixedRateString = "${monitoring.cycle:60000}",
+            initialDelayString = "${monitoring.initial-delay:0}"
+    )
     public void monitoring() {
-        log.info("监控任务开始，开始时间={}，目标交易对={}", LOG_TIME_FORMATTER.format(LocalDateTime.now()), TARGET_SYMBOL);
+        log.info("监控任务开始，开始时间={}，目标交易对={}", LOG_TIME_FORMATTER.format(LocalDateTime.now()), targetSymbol);
 
         BinanceSymbolsDTO symbolsDTO;
         try {
@@ -54,10 +60,10 @@ public class AlertService {
         log.info("本轮监控共加载 {} 个交易对", symbolsDTO.getSymbols().size());
 
         List<BinanceSymbolsDetailDTO> targetSymbols = symbolsDTO.getSymbols().stream()
-                .filter(symbol -> TARGET_SYMBOL.equals(symbol.getSymbol()))
+                .filter(symbol -> targetSymbol.equals(symbol.getSymbol()))
                 .collect(Collectors.toList());
         if (CollectionUtils.isEmpty(targetSymbols)) {
-            log.warn("交易对列表中未找到目标交易对 {}，任务结束", TARGET_SYMBOL);
+            log.warn("交易对列表中未找到目标交易对 {}，任务结束", targetSymbol);
             return;
         }
 

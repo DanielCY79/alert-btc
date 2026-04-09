@@ -2,37 +2,38 @@ package com.mobai.alert.strategy;
 
 import com.mobai.alert.access.dto.BinanceKlineDTO;
 import com.mobai.alert.state.signal.AlertSignal;
-import com.mobai.alert.state.signal.TradeDirection;
+import com.mobai.alert.strategy.breakout.ConfirmedBreakoutStrategyEvaluator;
+import com.mobai.alert.strategy.pullback.BreakoutPullbackStrategyEvaluator;
+import com.mobai.alert.strategy.range.RangeFailureStrategyEvaluator;
+import com.mobai.alert.strategy.shared.StrategySettings;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
-import org.springframework.util.CollectionUtils;
 
 import java.math.BigDecimal;
-import java.math.RoundingMode;
 import java.util.List;
 import java.util.Optional;
 
 @Service
 public class AlertRuleEvaluator {
     /*
-     * 这是一套“区间优先”的 BTC 价格行为策略评估器。
-     * 核心思想是：
-     * 1. 先识别市场是否处于可交易区间。
-     * 2. 区间边缘优先找失败突破，而不是追第一下突破。
-     * 3. 真正有效的突破，需要实体、收盘位置和量能共同确认。
-     * 4. 真突破之后，优先等待第一次回踩确认，而不是直接追高追低。
+     * 这是策略层的统一门面类。
+     * 它本身不再承载所有策略细节，而是负责：
+     * 1. 持有当前策略参数；
+     * 2. 生成参数快照；
+     * 3. 把请求分发到三个独立策略类：
+     *    - 区间失败突破
+     *    - 确认突破
+     *    - 突破后回踩
+     *
+     * 如果把整套策略用最通俗的话来说，就是：
+     * - 市场在区间里时，优先看边缘的失败突破；
+     * - 市场真突破时，不是看“碰一下边界”，而是看“有没有被接受”；
+     * - 市场突破后，最舒服的入场点通常不是第一根突破K线，而是第一次回踩确认。
      */
 
-    private static final String RANGE_FAILURE_LONG_TYPE = "RANGE_FAILURE_LONG";
-    private static final String RANGE_FAILURE_SHORT_TYPE = "RANGE_FAILURE_SHORT";
-    private static final String BREAKOUT_LONG_TYPE = "CONFIRMED_BREAKOUT_LONG";
-    private static final String BREAKOUT_SHORT_TYPE = "CONFIRMED_BREAKOUT_SHORT";
-    private static final String PULLBACK_LONG_TYPE = "BREAKOUT_PULLBACK_LONG";
-    private static final String PULLBACK_SHORT_TYPE = "BREAKOUT_PULLBACK_SHORT";
-
-    private static final BigDecimal ZERO = BigDecimal.ZERO;
-    private static final BigDecimal ONE = BigDecimal.ONE;
-    private static final BigDecimal TWO = new BigDecimal("2");
+    private final RangeFailureStrategyEvaluator rangeFailureStrategyEvaluator = new RangeFailureStrategyEvaluator();
+    private final ConfirmedBreakoutStrategyEvaluator confirmedBreakoutStrategyEvaluator = new ConfirmedBreakoutStrategyEvaluator();
+    private final BreakoutPullbackStrategyEvaluator breakoutPullbackStrategyEvaluator = new BreakoutPullbackStrategyEvaluator();
 
     // 快速均线周期，用来衡量短期价格重心。
     @Value("${monitoring.strategy.trend.fast-period:20}")
@@ -119,561 +120,93 @@ public class AlertRuleEvaluator {
     private BigDecimal pullbackMaxVolumeRatio;
 
     /**
-     * 区间下沿假跌破后重新收回。
-     * 这是典型的“扫流动性后回到区间”的做多信号。
+     * 对外暴露“区间下破失败做多”策略。
+     * 调用方不需要知道内部具体实现在哪个子类里，只需要从这里取结果即可。
      */
     public Optional<AlertSignal> evaluateRangeFailedBreakdownLong(List<BinanceKlineDTO> klines) {
-        List<BinanceKlineDTO> closedKlines = closedKlines(klines);
-        if (!hasEnoughBars(closedKlines, minimumBarsRequired())) {
-            return Optional.empty();
-        }
-
-        RangeContext range = buildRangeContext(closedKlines);
-        if (range == null) {
-            return Optional.empty();
-        }
-
-        BinanceKlineDTO latest = last(closedKlines);
-        BigDecimal low = valueOf(latest.getLow());
-        BigDecimal close = valueOf(latest.getClose());
-        BigDecimal support = range.support();
-        // 先要求价格真实刺穿支撑，而不是只在支撑附近晃一下。
-        if (low.compareTo(support.multiply(ONE.subtract(failureProbeBuffer))) > 0) {
-            return Optional.empty();
-        }
-        // 再要求收盘重新站回区间，证明下破没有被市场接受。
-        if (close.compareTo(support.multiply(ONE.add(failureReentryBuffer))) < 0) {
-            return Optional.empty();
-        }
-        // 做多方向要求收阳，并且收盘尽量靠近K线上半部，说明买盘接管。
-        if (!isBullish(latest) || closeLocation(latest).compareTo(new BigDecimal("0.60")) < 0) {
-            return Optional.empty();
-        }
-        // 下影线要明显长于实体，体现“下破失败”的拒绝感。
-        if (lowerWick(latest).compareTo(bodySize(latest).multiply(failureMinWickBodyRatio)) < 0) {
-            return Optional.empty();
-        }
-        // 如果已经直接收到区间中轴上方，盈亏比会变差，因此放弃。
-        if (close.compareTo(range.midpoint()) > 0) {
-            return Optional.empty();
-        }
-
-        BigDecimal volumeRatio = ratio(volumeOf(latest), averageVolume(range.window()));
-        BigDecimal invalidationPrice = low.multiply(ONE.subtract(failureReentryBuffer));
-        String summary = String.format(
-                "Established range support was swept and reclaimed. Price closed back inside the range with a strong rejection wick."
-        );
-        return Optional.of(new AlertSignal(
-                TradeDirection.LONG,
-                "BTC Range Failed Breakdown",
-                latest,
-                RANGE_FAILURE_LONG_TYPE,
-                summary,
-                support.setScale(2, RoundingMode.HALF_UP),
-                invalidationPrice.setScale(2, RoundingMode.HALF_UP),
-                range.midpoint().setScale(2, RoundingMode.HALF_UP),
-                volumeRatio.setScale(2, RoundingMode.HALF_UP)
-        ));
+        return rangeFailureStrategyEvaluator.evaluateRangeFailedBreakdownLong(klines, currentSettings());
     }
 
     /**
-     * 区间上沿假突破后重新跌回区间。
-     * 这是与假跌破对称的做空信号。
+     * 对外暴露“区间上破失败做空”策略。
      */
     public Optional<AlertSignal> evaluateRangeFailedBreakoutShort(List<BinanceKlineDTO> klines) {
-        List<BinanceKlineDTO> closedKlines = closedKlines(klines);
-        if (!hasEnoughBars(closedKlines, minimumBarsRequired())) {
-            return Optional.empty();
-        }
-
-        RangeContext range = buildRangeContext(closedKlines);
-        if (range == null) {
-            return Optional.empty();
-        }
-
-        BinanceKlineDTO latest = last(closedKlines);
-        BigDecimal high = valueOf(latest.getHigh());
-        BigDecimal close = valueOf(latest.getClose());
-        BigDecimal resistance = range.resistance();
-        // 先要求价格刺穿阻力，确认出现了“向上扫单”。
-        if (high.compareTo(resistance.multiply(ONE.add(failureProbeBuffer))) < 0) {
-            return Optional.empty();
-        }
-        // 收盘重新落回阻力下方，说明上破没有被接受。
-        if (close.compareTo(resistance.multiply(ONE.subtract(failureReentryBuffer))) > 0) {
-            return Optional.empty();
-        }
-        // 做空方向要求收阴，并且收盘尽量靠近K线下半部。
-        if (!isBearish(latest) || closeLocation(latest).compareTo(new BigDecimal("0.40")) > 0) {
-            return Optional.empty();
-        }
-        // 上影线越长，越说明上破失败后的抛压明显。
-        if (upperWick(latest).compareTo(bodySize(latest).multiply(failureMinWickBodyRatio)) < 0) {
-            return Optional.empty();
-        }
-        // 如果已经回到中轴下方过深，信号性价比反而下降。
-        if (close.compareTo(range.midpoint()) < 0) {
-            return Optional.empty();
-        }
-
-        BigDecimal volumeRatio = ratio(volumeOf(latest), averageVolume(range.window()));
-        BigDecimal invalidationPrice = high.multiply(ONE.add(failureReentryBuffer));
-        String summary = String.format(
-                "Established range resistance was swept and rejected. Price closed back inside the range with a strong upper wick."
-        );
-        return Optional.of(new AlertSignal(
-                TradeDirection.SHORT,
-                "BTC Range Failed Breakout",
-                latest,
-                RANGE_FAILURE_SHORT_TYPE,
-                summary,
-                resistance.setScale(2, RoundingMode.HALF_UP),
-                invalidationPrice.setScale(2, RoundingMode.HALF_UP),
-                range.midpoint().setScale(2, RoundingMode.HALF_UP),
-                volumeRatio.setScale(2, RoundingMode.HALF_UP)
-        ));
+        return rangeFailureStrategyEvaluator.evaluateRangeFailedBreakoutShort(klines, currentSettings());
     }
 
+    /**
+     * 对外暴露“区间确认突破做多”策略。
+     */
     public Optional<AlertSignal> evaluateTrendBreakout(List<BinanceKlineDTO> klines) {
-        return evaluateConfirmedBreakout(klines, true);
+        return confirmedBreakoutStrategyEvaluator.evaluateTrendBreakout(klines, currentSettings());
     }
 
+    /**
+     * 对外暴露“区间确认跌破做空”策略。
+     */
     public Optional<AlertSignal> evaluateTrendBreakdown(List<BinanceKlineDTO> klines) {
-        return evaluateConfirmedBreakout(klines, false);
+        return confirmedBreakoutStrategyEvaluator.evaluateTrendBreakdown(klines, currentSettings());
     }
 
+    /**
+     * 向上突破场景的简化调用，默认不额外传入目标位。
+     */
     public Optional<AlertSignal> evaluateBreakoutPullback(List<BinanceKlineDTO> klines,
                                                           BigDecimal breakoutLevel) {
         return evaluateBreakoutPullback(klines, breakoutLevel, null, true);
     }
 
+    /**
+     * 突破后回踩策略的简化调用。
+     * bullishBreakout=true 表示向上突破后的回踩做多；
+     * bullishBreakout=false 表示向下跌破后的反抽做空。
+     */
     public Optional<AlertSignal> evaluateBreakoutPullback(List<BinanceKlineDTO> klines,
                                                           BigDecimal breakoutLevel,
                                                           boolean bullishBreakout) {
         return evaluateBreakoutPullback(klines, breakoutLevel, null, bullishBreakout);
     }
 
+    /**
+     * 对外暴露“突破后回踩确认”策略的完整调用形式。
+     * 这是三类策略里最偏“顺势二次入场”的一种。
+     */
     public Optional<AlertSignal> evaluateBreakoutPullback(List<BinanceKlineDTO> klines,
                                                           BigDecimal breakoutLevel,
                                                           BigDecimal targetPrice,
                                                           boolean bullishBreakout) {
-        List<BinanceKlineDTO> closedKlines = closedKlines(klines);
-        if (!hasEnoughBars(closedKlines, minimumBarsRequired())) {
-            return Optional.empty();
-        }
-
-        BinanceKlineDTO latest = last(closedKlines);
-        BigDecimal latestLow = valueOf(latest.getLow());
-        BigDecimal latestHigh = valueOf(latest.getHigh());
-        BigDecimal latestClose = valueOf(latest.getClose());
-        BigDecimal latestOpen = valueOf(latest.getOpen());
-
-        BigDecimal averageVolume = averageVolume(trailingWindow(closedKlines, Math.min(10, rangeLookback), 1));
-        BigDecimal volumeRatio = ratio(volumeOf(latest), averageVolume);
-        // 回踩阶段更希望看到“缩量确认”，而不是再次放量剧烈对冲。
-        if (volumeRatio.compareTo(pullbackMaxVolumeRatio) > 0) {
-            return Optional.empty();
-        }
-
-        if (bullishBreakout) {
-            BigDecimal touchCeiling = breakoutLevel.multiply(ONE.add(pullbackTouchTolerance));
-            BigDecimal holdFloor = breakoutLevel.multiply(ONE.subtract(pullbackHoldBuffer));
-            // 必须真的回踩到突破位附近，否则不算“回踩确认”。
-            if (latestLow.compareTo(touchCeiling) > 0) {
-                return Optional.empty();
-            }
-            // 回踩之后要守住突破位下方的容忍区间，并重新收强。
-            if (latestClose.compareTo(holdFloor) < 0 || latestClose.compareTo(latestOpen) <= 0) {
-                return Optional.empty();
-            }
-
-            return Optional.of(new AlertSignal(
-                    TradeDirection.LONG,
-                    "BTC Breakout Pullback Long",
-                    latest,
-                    PULLBACK_LONG_TYPE,
-                    "Price retested the accepted breakout area and held above it. This is the preferred post-breakout long setup.",
-                    breakoutLevel.setScale(2, RoundingMode.HALF_UP),
-                    holdFloor.setScale(2, RoundingMode.HALF_UP),
-                    scaleOrNull(targetPrice),
-                    volumeRatio.setScale(2, RoundingMode.HALF_UP)
-            ));
-        }
-
-        BigDecimal touchFloor = breakoutLevel.multiply(ONE.subtract(pullbackTouchTolerance));
-        BigDecimal holdCeiling = breakoutLevel.multiply(ONE.add(pullbackHoldBuffer));
-        // 空头回踩则要求反抽到跌破位附近。
-        if (latestHigh.compareTo(touchFloor) < 0) {
-            return Optional.empty();
-        }
-        // 反抽不能有效站回跌破位上方，并且最好重新收弱。
-        if (latestClose.compareTo(holdCeiling) > 0 || latestClose.compareTo(latestOpen) >= 0) {
-            return Optional.empty();
-        }
-
-        return Optional.of(new AlertSignal(
-                TradeDirection.SHORT,
-                "BTC Breakout Pullback Short",
-                latest,
-                PULLBACK_SHORT_TYPE,
-                "Price retested the accepted breakdown area and failed to reclaim it. This is the preferred post-breakdown short setup.",
-                breakoutLevel.setScale(2, RoundingMode.HALF_UP),
-                holdCeiling.setScale(2, RoundingMode.HALF_UP),
-                scaleOrNull(targetPrice),
-                volumeRatio.setScale(2, RoundingMode.HALF_UP)
-        ));
+        return breakoutPullbackStrategyEvaluator.evaluateBreakoutPullback(
+                klines,
+                breakoutLevel,
+                targetPrice,
+                bullishBreakout,
+                currentSettings()
+        );
     }
 
-    private Optional<AlertSignal> evaluateConfirmedBreakout(List<BinanceKlineDTO> klines, boolean bullishBreakout) {
-        List<BinanceKlineDTO> closedKlines = closedKlines(klines);
-        if (!hasEnoughBars(closedKlines, minimumBarsRequired())) {
-            return Optional.empty();
-        }
-
-        RangeContext range = buildRangeContext(closedKlines);
-        if (range == null) {
-            return Optional.empty();
-        }
-
-        BinanceKlineDTO latest = last(closedKlines);
-        BinanceKlineDTO previous = closedKlines.get(closedKlines.size() - 2);
-        BigDecimal close = valueOf(latest.getClose());
-        BigDecimal previousClose = valueOf(previous.getClose());
-        BigDecimal boundary = bullishBreakout ? range.resistance() : range.support();
-        BigDecimal closeThreshold = bullishBreakout
-                ? boundary.multiply(ONE.add(breakoutCloseBuffer))
-                : boundary.multiply(ONE.subtract(breakoutCloseBuffer));
-        BigDecimal previousThreshold = bullishBreakout
-                ? boundary.multiply(ONE.add(breakoutCloseBuffer))
-                : boundary.multiply(ONE.subtract(breakoutCloseBuffer));
-
-        // 当前K线必须有效收在边界之外，说明突破被市场接受。
-        if (bullishBreakout && close.compareTo(closeThreshold) <= 0) {
-            return Optional.empty();
-        }
-        if (!bullishBreakout && close.compareTo(closeThreshold) >= 0) {
-            return Optional.empty();
-        }
-        // 前一根不能已经提前站稳边界外，否则这里更像“突破后的延续”，不是首次确认。
-        if (bullishBreakout && previousClose.compareTo(previousThreshold) > 0) {
-            return Optional.empty();
-        }
-        if (!bullishBreakout && previousClose.compareTo(previousThreshold) < 0) {
-            return Optional.empty();
-        }
-        // 真突破需要较大的实体占比，减少长影线假突破。
-        if (bodyRatio(latest).compareTo(breakoutBodyRatioThreshold) < 0) {
-            return Optional.empty();
-        }
-        // 收盘位置也要靠近突破方向一侧，避免“看起来突破，实际收得很虚”。
-        if (bullishBreakout && closeLocation(latest).compareTo(new BigDecimal("0.65")) < 0) {
-            return Optional.empty();
-        }
-        if (!bullishBreakout && closeLocation(latest).compareTo(new BigDecimal("0.35")) > 0) {
-            return Optional.empty();
-        }
-        if (bullishBreakout && !isBullish(latest)) {
-            return Optional.empty();
-        }
-        if (!bullishBreakout && !isBearish(latest)) {
-            return Optional.empty();
-        }
-
-        BigDecimal averageVolume = averageVolume(range.window());
-        BigDecimal volumeRatio = ratio(volumeOf(latest), averageVolume);
-        // 放量是“被接受突破”的重要确认条件。
-        if (volumeRatio.compareTo(breakoutVolumeMultiplier) < 0) {
-            return Optional.empty();
-        }
-
-        BigDecimal extensionCap = bullishBreakout
-                ? boundary.multiply(ONE.add(breakoutMaxExtension))
-                : boundary.multiply(ONE.subtract(breakoutMaxExtension));
-        // 过度远离边界的K线容易是情绪释放，追进去的性价比不高。
-        if (bullishBreakout && close.compareTo(extensionCap) > 0) {
-            return Optional.empty();
-        }
-        if (!bullishBreakout && close.compareTo(extensionCap) < 0) {
-            return Optional.empty();
-        }
-
-        BigDecimal invalidationPrice = bullishBreakout
-                ? boundary.multiply(ONE.subtract(breakoutFailureBuffer))
-                : boundary.multiply(ONE.add(breakoutFailureBuffer));
-        BigDecimal measuredMoveTarget = bullishBreakout
-                ? range.resistance().add(range.resistance().subtract(range.support()))
-                : range.support().subtract(range.resistance().subtract(range.support()));
-        String title = bullishBreakout ? "BTC Confirmed Range Breakout" : "BTC Confirmed Range Breakdown";
-        String type = bullishBreakout ? BREAKOUT_LONG_TYPE : BREAKOUT_SHORT_TYPE;
-        String summary = bullishBreakout
-                ? String.format("An established range was accepted to the upside with strong body quality and %.2fx relative volume.", volumeRatio.setScale(2, RoundingMode.HALF_UP))
-                : String.format("An established range was accepted to the downside with strong body quality and %.2fx relative volume.", volumeRatio.setScale(2, RoundingMode.HALF_UP));
-
-        return Optional.of(new AlertSignal(
-                bullishBreakout ? TradeDirection.LONG : TradeDirection.SHORT,
-                title,
-                latest,
-                type,
-                summary,
-                boundary.setScale(2, RoundingMode.HALF_UP),
-                invalidationPrice.setScale(2, RoundingMode.HALF_UP),
-                measuredMoveTarget.setScale(2, RoundingMode.HALF_UP),
-                volumeRatio.setScale(2, RoundingMode.HALF_UP)
-        ));
-    }
-
-    /**
-     * 区间识别是整套策略的前提。
-     * 这里不是简单看“横盘”，而是从四个角度过滤：
-     * 1. 区间宽度要合适；
-     * 2. 上下边缘都要被反复测试；
-     * 3. K线之间要有足够重叠；
-     * 4. 均线漂移不能太大，否则更像趋势而不是区间。
-     */
-    private RangeContext buildRangeContext(List<BinanceKlineDTO> closedKlines) {
-        if (!hasEnoughBars(closedKlines, minimumBarsRequired())) {
-            return null;
-        }
-
-        // 区间判断固定排除最后一根未参与确认的K线，避免用当前信号K线定义区间本身。
-        List<BinanceKlineDTO> window = trailingWindow(closedKlines, rangeLookback, 1);
-        if (CollectionUtils.isEmpty(window) || window.size() < rangeLookback) {
-            return null;
-        }
-
-        BigDecimal resistance = highestHigh(window);
-        BigDecimal support = lowestLow(window);
-        BigDecimal width = percentageDistance(resistance, support);
-        if (width.compareTo(rangeMinWidth) < 0 || width.compareTo(rangeMaxWidth) > 0) {
-            return null;
-        }
-
-        // 边缘触达次数不足，说明上下边界还没有被市场反复确认。
-        int topTouches = countTopTouches(window, resistance);
-        int bottomTouches = countBottomTouches(window, support);
-        if (topTouches < requiredEdgeTouches || bottomTouches < requiredEdgeTouches) {
-            return null;
-        }
-
-        // 重叠不够通常意味着波动具有单边推进特征，不适合按区间处理。
-        int overlappingBars = countOverlappingBars(window);
-        if (overlappingBars < minOverlapBars) {
-            return null;
-        }
-
-        // 均线漂移过大说明价格重心在移动，更像趋势中的整理而不是成熟区间。
-        BigDecimal fastMa = movingAverage(closedKlines, fastPeriod, 0);
-        BigDecimal laggedFastMa = movingAverage(closedKlines, fastPeriod, Math.min(5, closedKlines.size() - fastPeriod));
-        BigDecimal maDrift = ratio(fastMa.subtract(laggedFastMa).abs(), laggedFastMa);
-        if (maDrift.compareTo(maFlatThreshold) > 0) {
-            return null;
-        }
-
-        BigDecimal midpoint = resistance.add(support).divide(TWO, 8, RoundingMode.HALF_UP);
-        return new RangeContext(window, support, resistance, midpoint, width);
-    }
-
-    private int minimumBarsRequired() {
-        return Math.max(slowPeriod + 6, rangeLookback + fastPeriod + 6);
-    }
-
-    private boolean hasEnoughBars(List<BinanceKlineDTO> closedKlines, int minimumSize) {
-        return !CollectionUtils.isEmpty(closedKlines) && closedKlines.size() >= minimumSize;
-    }
-
-    private List<BinanceKlineDTO> closedKlines(List<BinanceKlineDTO> klines) {
-        // 统一只使用已收盘K线，避免未收盘K线在盘中反复变化导致假信号。
-        if (CollectionUtils.isEmpty(klines) || klines.size() < 2) {
-            return List.of();
-        }
-        return klines.subList(0, klines.size() - 1);
-    }
-
-    private List<BinanceKlineDTO> trailingWindow(List<BinanceKlineDTO> klines, int size, int excludeLastBars) {
-        int endExclusive = klines.size() - excludeLastBars;
-        int startInclusive = Math.max(0, endExclusive - size);
-        return klines.subList(startInclusive, endExclusive);
-    }
-
-    private BinanceKlineDTO last(List<BinanceKlineDTO> klines) {
-        return klines.get(klines.size() - 1);
-    }
-
-    private BigDecimal movingAverage(List<BinanceKlineDTO> klines, int period, int offset) {
-        int safeOffset = Math.max(0, offset);
-        int endExclusive = klines.size() - safeOffset;
-        int startInclusive = endExclusive - period;
-        BigDecimal total = ZERO;
-        for (int i = startInclusive; i < endExclusive; i++) {
-            total = total.add(valueOf(klines.get(i).getClose()));
-        }
-        return total.divide(BigDecimal.valueOf(period), 8, RoundingMode.HALF_UP);
-    }
-
-    private BigDecimal highestHigh(List<BinanceKlineDTO> klines) {
-        BigDecimal highest = ZERO;
-        for (BinanceKlineDTO kline : klines) {
-            BigDecimal candidate = valueOf(kline.getHigh());
-            if (candidate.compareTo(highest) > 0) {
-                highest = candidate;
-            }
-        }
-        return highest;
-    }
-
-    private BigDecimal lowestLow(List<BinanceKlineDTO> klines) {
-        BigDecimal lowest = valueOf(klines.get(0).getLow());
-        for (BinanceKlineDTO kline : klines) {
-            BigDecimal candidate = valueOf(kline.getLow());
-            if (candidate.compareTo(lowest) < 0) {
-                lowest = candidate;
-            }
-        }
-        return lowest;
-    }
-
-    private BigDecimal averageVolume(List<BinanceKlineDTO> klines) {
-        BigDecimal total = ZERO;
-        for (BinanceKlineDTO kline : klines) {
-            total = total.add(volumeOf(kline));
-        }
-        return total.divide(BigDecimal.valueOf(klines.size()), 8, RoundingMode.HALF_UP);
-    }
-
-    private int countTopTouches(List<BinanceKlineDTO> window, BigDecimal resistance) {
-        int count = 0;
-        BigDecimal floor = resistance.multiply(ONE.subtract(rangeEdgeTolerance));
-        for (BinanceKlineDTO kline : window) {
-            if (valueOf(kline.getHigh()).compareTo(floor) >= 0) {
-                count++;
-            }
-        }
-        return count;
-    }
-
-    private int countBottomTouches(List<BinanceKlineDTO> window, BigDecimal support) {
-        int count = 0;
-        BigDecimal ceiling = support.multiply(ONE.add(rangeEdgeTolerance));
-        for (BinanceKlineDTO kline : window) {
-            if (valueOf(kline.getLow()).compareTo(ceiling) <= 0) {
-                count++;
-            }
-        }
-        return count;
-    }
-
-    private int countOverlappingBars(List<BinanceKlineDTO> window) {
-        int count = 0;
-        for (int i = 1; i < window.size(); i++) {
-            // 相邻K线重叠越多，越符合“多空反复交换主导权”的区间特征。
-            if (overlapRatio(window.get(i - 1), window.get(i)).compareTo(overlapThreshold) >= 0) {
-                count++;
-            }
-        }
-        return count;
-    }
-
-    private BigDecimal overlapRatio(BinanceKlineDTO left, BinanceKlineDTO right) {
-        BigDecimal leftHigh = valueOf(left.getHigh());
-        BigDecimal leftLow = valueOf(left.getLow());
-        BigDecimal rightHigh = valueOf(right.getHigh());
-        BigDecimal rightLow = valueOf(right.getLow());
-
-        BigDecimal overlapHigh = leftHigh.min(rightHigh);
-        BigDecimal overlapLow = leftLow.max(rightLow);
-        if (overlapHigh.compareTo(overlapLow) <= 0) {
-            return ZERO;
-        }
-
-        BigDecimal overlap = overlapHigh.subtract(overlapLow);
-        BigDecimal leftRange = leftHigh.subtract(leftLow);
-        BigDecimal rightRange = rightHigh.subtract(rightLow);
-        BigDecimal smallerRange = leftRange.min(rightRange);
-        if (smallerRange.compareTo(ZERO) <= 0) {
-            return ZERO;
-        }
-        return overlap.divide(smallerRange, 8, RoundingMode.HALF_UP);
-    }
-
-    private boolean isBullish(BinanceKlineDTO kline) {
-        return valueOf(kline.getClose()).compareTo(valueOf(kline.getOpen())) > 0;
-    }
-
-    private boolean isBearish(BinanceKlineDTO kline) {
-        return valueOf(kline.getClose()).compareTo(valueOf(kline.getOpen())) < 0;
-    }
-
-    private BigDecimal percentageDistance(BigDecimal high, BigDecimal low) {
-        return high.subtract(low).divide(low, 8, RoundingMode.HALF_UP);
-    }
-
-    private BigDecimal ratio(BigDecimal numerator, BigDecimal denominator) {
-        if (denominator.compareTo(ZERO) == 0) {
-            return ZERO;
-        }
-        return numerator.divide(denominator, 8, RoundingMode.HALF_UP);
-    }
-
-    private BigDecimal volumeOf(BinanceKlineDTO kline) {
-        return valueOf(kline.getVolume());
-    }
-
-    private BigDecimal bodySize(BinanceKlineDTO kline) {
-        return valueOf(kline.getClose()).subtract(valueOf(kline.getOpen())).abs();
-    }
-
-    private BigDecimal barRange(BinanceKlineDTO kline) {
-        return valueOf(kline.getHigh()).subtract(valueOf(kline.getLow()));
-    }
-
-    private BigDecimal bodyRatio(BinanceKlineDTO kline) {
-        BigDecimal range = barRange(kline);
-        if (range.compareTo(ZERO) == 0) {
-            return ZERO;
-        }
-        return bodySize(kline).divide(range, 8, RoundingMode.HALF_UP);
-    }
-
-    private BigDecimal closeLocation(BinanceKlineDTO kline) {
-        BigDecimal range = barRange(kline);
-        if (range.compareTo(ZERO) == 0) {
-            return new BigDecimal("0.50");
-        }
-        return valueOf(kline.getClose()).subtract(valueOf(kline.getLow()))
-                .divide(range, 8, RoundingMode.HALF_UP);
-    }
-
-    private BigDecimal lowerWick(BinanceKlineDTO kline) {
-        BigDecimal open = valueOf(kline.getOpen());
-        BigDecimal close = valueOf(kline.getClose());
-        BigDecimal low = valueOf(kline.getLow());
-        return open.min(close).subtract(low).max(ZERO);
-    }
-
-    private BigDecimal upperWick(BinanceKlineDTO kline) {
-        BigDecimal open = valueOf(kline.getOpen());
-        BigDecimal close = valueOf(kline.getClose());
-        BigDecimal high = valueOf(kline.getHigh());
-        return high.subtract(open.max(close)).max(ZERO);
-    }
-
-    private BigDecimal valueOf(String value) {
-        return new BigDecimal(value);
-    }
-
-    private BigDecimal scaleOrNull(BigDecimal value) {
-        if (value == null) {
-            return null;
-        }
-        return value.setScale(2, RoundingMode.HALF_UP);
-    }
-
-    private record RangeContext(List<BinanceKlineDTO> window,
-                                BigDecimal support,
-                                BigDecimal resistance,
-                                BigDecimal midpoint,
-                                BigDecimal width) {
-        // window 是用于定义区间的历史观察窗口；
-        // support / resistance / midpoint 则是后续信号判定直接依赖的关键价格区域。
+    private StrategySettings currentSettings() {
+        return new StrategySettings(
+                fastPeriod,
+                slowPeriod,
+                rangeLookback,
+                rangeMinWidth,
+                rangeMaxWidth,
+                rangeEdgeTolerance,
+                requiredEdgeTouches,
+                overlapThreshold,
+                minOverlapBars,
+                maFlatThreshold,
+                breakoutCloseBuffer,
+                breakoutVolumeMultiplier,
+                breakoutBodyRatioThreshold,
+                breakoutMaxExtension,
+                breakoutFailureBuffer,
+                failureProbeBuffer,
+                failureReentryBuffer,
+                failureMinWickBodyRatio,
+                pullbackTouchTolerance,
+                pullbackHoldBuffer,
+                pullbackMaxVolumeRatio
+        );
     }
 }

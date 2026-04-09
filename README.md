@@ -44,6 +44,10 @@ src/main/java/com/mobai/alert
 |  |- runtime
 |  `- signal
 `- strategy
+   |- breakout
+   |- pullback
+   |- range
+   |- shared
    `- backtest
 ```
 
