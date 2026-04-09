@@ -1,4 +1,4 @@
-package com.mobai.alert.dto;
+package com.mobai.alert.access.dto;
 
 public class BinanceSymbolsDetailDTO {
     private String symbol;

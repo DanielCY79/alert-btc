@@ -1,4 +1,4 @@
-package com.mobai.alert.config;
+package com.mobai.alert.access.config;
 
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;

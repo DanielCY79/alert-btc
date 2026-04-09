@@ -1,8 +1,10 @@
-package com.mobai.alert.service;
+package com.mobai.alert.access.market;
 
 import com.alibaba.fastjson.JSON;
-import com.mobai.alert.api.BinanceApi;
-import com.mobai.alert.dto.BinanceSymbolsDTO;
+import com.mobai.alert.access.dto.BinanceSymbolsDTO;
+import com.mobai.alert.access.exchange.BinanceApi;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 import org.springframework.util.StringUtils;
 
@@ -21,6 +23,8 @@ import java.util.Objects;
 @Service
 public class AlertSymbolCacheService {
 
+    private static final Logger log = LoggerFactory.getLogger(AlertSymbolCacheService.class);
+
     private final BinanceApi binanceApi;
     private final Path cacheFilePath = Paths.get(System.getProperty("user.dir"), "symbolsCache.json");
 
@@ -28,9 +32,6 @@ public class AlertSymbolCacheService {
         this.binanceApi = binanceApi;
     }
 
-    /**
-     * 交易对列表按天缓存，避免每分钟都去拉取一次全量交易对。
-     */
     public BinanceSymbolsDTO loadSymbols() throws IOException {
         if (Files.exists(cacheFilePath) && Files.size(cacheFilePath) > 0) {
             BasicFileAttributes attrs = Files.readAttributes(cacheFilePath, BasicFileAttributes.class);
@@ -40,14 +41,16 @@ public class AlertSymbolCacheService {
                     .toLocalDateTime();
 
             if (isToday(lastModifiedTime)) {
-                // 当天缓存直接复用，只有内容为空时才重新刷新。
                 String content = Files.readString(cacheFilePath, StandardCharsets.UTF_8);
                 if (!StringUtils.hasText(content) || "{}".equals(content)) {
+                    log.info("交易对缓存文件存在但内容为空，准备重新刷新缓存：{}", cacheFilePath);
                     return refreshSymbols();
                 }
+                log.info("命中当日交易对缓存，直接复用本地文件：{}", cacheFilePath);
                 return JSON.parseObject(content, BinanceSymbolsDTO.class);
             }
 
+            log.info("交易对缓存已过期，准备清理并重新拉取：{}", cacheFilePath);
             clearFileContent();
         }
 
@@ -63,7 +66,6 @@ public class AlertSymbolCacheService {
     }
 
     private BinanceSymbolsDTO refreshSymbols() {
-        // 刷新后立即覆盖本地缓存，方便下一轮调度直接读取。
         BinanceSymbolsDTO symbolsDTO = binanceApi.listSymbols();
         try {
             Files.writeString(
@@ -73,9 +75,10 @@ public class AlertSymbolCacheService {
                     StandardOpenOption.CREATE,
                     StandardOpenOption.TRUNCATE_EXISTING
             );
-            System.out.println("Updated file with new data.");
+            int symbolCount = symbolsDTO == null || symbolsDTO.getSymbols() == null ? 0 : symbolsDTO.getSymbols().size();
+            log.info("交易对缓存刷新完成，共写入 {} 个交易对，缓存文件：{}", symbolCount, cacheFilePath);
         } catch (IOException e) {
-            e.printStackTrace();
+            log.error("写入交易对缓存文件失败，path={}", cacheFilePath, e);
         }
         return symbolsDTO;
     }

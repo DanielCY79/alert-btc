@@ -1,32 +1,42 @@
-package com.mobai.alert.service;
+package com.mobai.alert.state.signal;
 
-import com.mobai.alert.dto.BinanceKlineDTO;
+import com.mobai.alert.access.dto.BinanceKlineDTO;
 
 import java.math.BigDecimal;
 
 public class AlertSignal {
+    private final TradeDirection direction;
     private final String title;
     private final BinanceKlineDTO kline;
     private final String type;
     private final String summary;
     private final BigDecimal triggerPrice;
     private final BigDecimal invalidationPrice;
+    private final BigDecimal targetPrice;
     private final BigDecimal volumeRatio;
 
-    public AlertSignal(String title,
+    public AlertSignal(TradeDirection direction,
+                       String title,
                        BinanceKlineDTO kline,
                        String type,
                        String summary,
                        BigDecimal triggerPrice,
                        BigDecimal invalidationPrice,
+                       BigDecimal targetPrice,
                        BigDecimal volumeRatio) {
+        this.direction = direction;
         this.title = title;
         this.kline = kline;
         this.type = type;
         this.summary = summary;
         this.triggerPrice = triggerPrice;
         this.invalidationPrice = invalidationPrice;
+        this.targetPrice = targetPrice;
         this.volumeRatio = volumeRatio;
+    }
+
+    public TradeDirection getDirection() {
+        return direction;
     }
 
     public String getTitle() {
@@ -51,6 +61,10 @@ public class AlertSignal {
 
     public BigDecimal getInvalidationPrice() {
         return invalidationPrice;
+    }
+
+    public BigDecimal getTargetPrice() {
+        return targetPrice;
     }
 
     public BigDecimal getVolumeRatio() {

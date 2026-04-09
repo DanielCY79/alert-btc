@@ -1,4 +1,4 @@
-package com.mobai.alert.dto;
+package com.mobai.alert.access.dto;
 
 import java.util.List;
 
