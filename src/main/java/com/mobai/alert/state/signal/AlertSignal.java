@@ -1,6 +1,6 @@
 package com.mobai.alert.state.signal;
 
-import com.mobai.alert.access.dto.BinanceKlineDTO;
+import com.mobai.alert.access.binance.kline.dto.BinanceKlineDTO;
 
 import java.math.BigDecimal;
 
@@ -71,3 +71,4 @@ public class AlertSignal {
         return volumeRatio;
     }
 }
+

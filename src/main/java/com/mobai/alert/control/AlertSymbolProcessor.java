@@ -1,8 +1,8 @@
 package com.mobai.alert.control;
 
-import com.mobai.alert.access.dto.BinanceKlineDTO;
-import com.mobai.alert.access.dto.BinanceSymbolsDetailDTO;
-import com.mobai.alert.access.exchange.BinanceApi;
+import com.mobai.alert.access.facade.BinanceApi;
+import com.mobai.alert.access.binance.kline.dto.BinanceKlineDTO;
+import com.mobai.alert.access.binance.kline.dto.BinanceSymbolsDetailDTO;
 import com.mobai.alert.notification.AlertNotificationService;
 import com.mobai.alert.state.runtime.BreakoutRecord;
 import com.mobai.alert.state.signal.AlertSignal;
@@ -56,7 +56,7 @@ public class AlertSymbolProcessor {
             return;
         }
 
-        log.info("开始处理交易对，symbol={}，status={}，interval={}，limit={}",
+        log.info("寮€濮嬪鐞嗕氦鏄撳锛宻ymbol={}锛宻tatus={}锛宨nterval={}锛宭imit={}",
                 symbolDTO.getSymbol(),
                 symbolDTO.getStatus(),
                 klineInterval,
@@ -64,11 +64,11 @@ public class AlertSymbolProcessor {
 
         List<BinanceKlineDTO> klines = loadRecentKlines(symbolDTO.getSymbol());
         if (CollectionUtils.isEmpty(klines) || klines.size() < 3) {
-            log.warn("K 线数据不足，无法评估信号，symbol={}，实际 K 线数量={}", symbolDTO.getSymbol(), klines == null ? 0 : klines.size());
+            log.warn("K 绾挎暟鎹笉瓒筹紝鏃犳硶璇勪及淇″彿锛宻ymbol={}锛屽疄闄?K 绾挎暟閲?{}", symbolDTO.getSymbol(), klines == null ? 0 : klines.size());
             return;
         }
 
-        log.info("K 线加载完成，symbol={}，获取到 {} 根 K 线，最新收盘时间={}",
+        log.info("K 绾垮姞杞藉畬鎴愶紝symbol={}锛岃幏鍙栧埌 {} 鏍?K 绾匡紝鏈€鏂版敹鐩樻椂闂?{}",
                 symbolDTO.getSymbol(),
                 klines.size(),
                 klines.get(klines.size() - 1).getEndTime());
@@ -113,7 +113,7 @@ public class AlertSymbolProcessor {
         breakoutRecords.entrySet().removeIf(entry -> currentTime - entry.getValue().timestamp() > breakoutRecordTtlMs);
         int removed = before - breakoutRecords.size();
         if (removed > 0) {
-            log.info("已清理过期突破记录，数量={}", removed);
+            log.info("宸叉竻鐞嗚繃鏈熺獊鐮磋褰曪紝鏁伴噺={}", removed);
         }
     }
 
@@ -136,7 +136,7 @@ public class AlertSymbolProcessor {
 
     private boolean sendIfPresent(Optional<AlertSignal> signalOptional) {
         signalOptional.ifPresent(signal -> {
-            log.info("命中策略信号，symbol={}，signalType={}，direction={}，trigger={}，target={}",
+            log.info("鍛戒腑绛栫暐淇″彿锛宻ymbol={}锛宻ignalType={}锛宒irection={}锛宼rigger={}锛宼arget={}",
                     signal.getKline().getSymbol(),
                     signal.getType(),
                     signal.getDirection(),
@@ -148,7 +148,7 @@ public class AlertSymbolProcessor {
     }
 
     private boolean recordBreakout(AlertSignal signal, String recordKey, String oppositeKey) {
-        log.info("命中突破类信号，准备记录突破上下文，symbol={}，signalType={}，breakoutLevel={}，target={}",
+        log.info("鍛戒腑绐佺牬绫讳俊鍙凤紝鍑嗗璁板綍绐佺牬涓婁笅鏂囷紝symbol={}锛宻ignalType={}锛宐reakoutLevel={}锛宼arget={}",
                 signal.getKline().getSymbol(),
                 signal.getType(),
                 signal.getTriggerPrice(),
@@ -156,7 +156,7 @@ public class AlertSymbolProcessor {
         alertNotificationService.send(signal);
         breakoutRecords.put(recordKey, new BreakoutRecord(signal.getTriggerPrice(), signal.getTargetPrice(), System.currentTimeMillis()));
         breakoutRecords.remove(oppositeKey);
-        log.info("突破记录已更新，当前记录键={}，已清理对向记录键={}", recordKey, oppositeKey);
+        log.info("绐佺牬璁板綍宸叉洿鏂帮紝褰撳墠璁板綍閿?{}锛屽凡娓呯悊瀵瑰悜璁板綍閿?{}", recordKey, oppositeKey);
         return true;
     }
 
@@ -168,3 +168,4 @@ public class AlertSymbolProcessor {
         return targetSymbol + ":SHORT";
     }
 }
+

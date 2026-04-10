@@ -1,2 +1,15 @@
+* text=auto
+
 /mvnw text eol=lf
+*.sh text eol=lf
+*.bat text eol=crlf
 *.cmd text eol=crlf
+
+*.java text working-tree-encoding=UTF-8
+*.xml text working-tree-encoding=UTF-8
+*.properties text working-tree-encoding=UTF-8
+*.yml text working-tree-encoding=UTF-8
+*.yaml text working-tree-encoding=UTF-8
+*.json text working-tree-encoding=UTF-8
+*.md text working-tree-encoding=UTF-8
+*.txt text working-tree-encoding=UTF-8

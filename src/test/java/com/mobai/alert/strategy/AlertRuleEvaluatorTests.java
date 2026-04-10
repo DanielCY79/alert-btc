@@ -1,6 +1,6 @@
 package com.mobai.alert.strategy;
 
-import com.mobai.alert.access.dto.BinanceKlineDTO;
+import com.mobai.alert.access.binance.kline.dto.BinanceKlineDTO;
 import com.mobai.alert.state.signal.AlertSignal;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -131,3 +131,4 @@ class AlertRuleEvaluatorTests {
         return dto;
     }
 }
+

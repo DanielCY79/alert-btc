@@ -1,25 +1,25 @@
 package com.mobai.alert.strategy.shared;
 
-import com.mobai.alert.access.dto.BinanceKlineDTO;
+import com.mobai.alert.access.binance.kline.dto.BinanceKlineDTO;
 
 import java.math.BigDecimal;
 import java.util.List;
 
 /**
- * 区间上下文对象。
+ * 鍖洪棿涓婁笅鏂囧璞°€?
  *
- * 这个类表示：
- * “在最近一段历史K线里，系统已经确认出了一个可交易区间”。
+ * 杩欎釜绫昏〃绀猴細
+ * 鈥滃湪鏈€杩戜竴娈靛巻鍙睰绾块噷锛岀郴缁熷凡缁忕‘璁ゅ嚭浜嗕竴涓彲浜ゆ槗鍖洪棿鈥濄€?
  *
- * 它把后续策略判断最关心的几个价格区域统一打包：
- * - window：用于定义这个区间的历史样本窗口
- * - support：区间下沿
- * - resistance：区间上沿
- * - midpoint：区间中轴
- * - width：区间宽度
+ * 瀹冩妸鍚庣画绛栫暐鍒ゆ柇鏈€鍏冲績鐨勫嚑涓环鏍煎尯鍩熺粺涓€鎵撳寘锛?
+ * - window锛氱敤浜庡畾涔夎繖涓尯闂寸殑鍘嗗彶鏍锋湰绐楀彛
+ * - support锛氬尯闂翠笅娌?
+ * - resistance锛氬尯闂翠笂娌?
+ * - midpoint锛氬尯闂翠腑杞?
+ * - width锛氬尯闂村搴?
  *
- * 只要某个策略需要基于“成熟区间”做判断，
- * 它通常都会先依赖这个对象。
+ * 鍙鏌愪釜绛栫暐闇€瑕佸熀浜庘€滄垚鐔熷尯闂粹€濆仛鍒ゆ柇锛?
+ * 瀹冮€氬父閮戒細鍏堜緷璧栬繖涓璞°€?
  */
 public record RangeContext(List<BinanceKlineDTO> window,
                            BigDecimal support,
@@ -27,9 +27,10 @@ public record RangeContext(List<BinanceKlineDTO> window,
                            BigDecimal midpoint,
                            BigDecimal width) {
     /*
-     * 从交易理解上：
-     * - support / resistance 决定边缘交易与突破位置；
-     * - midpoint 决定区间内反向交易的第一目标；
-     * - width 既能用来过滤区间，也能衍生 measured move 目标。
+     * 浠庝氦鏄撶悊瑙ｄ笂锛?
+     * - support / resistance 鍐冲畾杈圭紭浜ゆ槗涓庣獊鐮翠綅缃紱
+     * - midpoint 鍐冲畾鍖洪棿鍐呭弽鍚戜氦鏄撶殑绗竴鐩爣锛?
+     * - width 鏃㈣兘鐢ㄦ潵杩囨护鍖洪棿锛屼篃鑳借鐢?measured move 鐩爣銆?
      */
 }
+

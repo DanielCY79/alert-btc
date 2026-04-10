@@ -1,6 +1,7 @@
 package com.mobai.alert.notification;
 
-import com.mobai.alert.access.dto.BinanceKlineDTO;
+import com.mobai.alert.access.binance.cms.dto.BinanceAnnouncementDTO;
+import com.mobai.alert.access.binance.kline.dto.BinanceKlineDTO;
 import com.mobai.alert.notification.channel.AlertNotifier;
 import com.mobai.alert.notification.model.NotificationMessage;
 import com.mobai.alert.state.signal.AlertSignal;
@@ -47,47 +48,16 @@ public class AlertNotificationService {
 
     public void send(AlertSignal signal) {
         String recordKey = signal.getKline().getSymbol() + signal.getType();
-        if (!allowSend(recordKey)) {
-            log.info("告警发送被冷却窗口拦截，recordKey={}，symbol={}，signalType={}",
-                    recordKey,
-                    signal.getKline().getSymbol(),
-                    signal.getType());
-            return;
-        }
+        NotificationMessage message = buildSignalMessage(signal);
+        send(recordKey, message, "alert signal", signal.getKline().getSymbol(), signal.getType());
+    }
 
-        if (CollectionUtils.isEmpty(alertNotifiers)) {
-            log.warn("未配置可用通知渠道，跳过发送，symbol={}，signalType={}",
-                    signal.getKline().getSymbol(),
-                    signal.getType());
-            return;
-        }
-
-        String selectedChannel = normalizeChannelName(notificationChannel);
-        AlertNotifier alertNotifier = notifierByChannel.get(selectedChannel);
-        if (alertNotifier == null) {
-            log.warn("未找到匹配的通知渠道配置，channel={}，可用渠道={}",
-                    selectedChannel,
-                    notifierByChannel.keySet());
-            return;
-        }
-
-        log.info("准备发送告警，symbol={}，interval={}，signalType={}，direction={}，channel={}",
-                signal.getKline().getSymbol(),
-                signal.getKline().getInterval(),
-                signal.getType(),
-                signal.getDirection(),
-                selectedChannel);
-
-        NotificationMessage message = buildMessage(signal);
-        try {
-            alertNotifier.send(message);
-        } catch (Exception e) {
-            log.error("通知渠道发送失败，channel={}，symbol={}，signalType={}",
-                    alertNotifier.channelName(),
-                    signal.getKline().getSymbol(),
-                    signal.getType(),
-                    e);
-        }
+    public void sendAnnouncement(BinanceAnnouncementDTO announcement) {
+        String title = StringUtils.hasText(announcement.getTitle()) ? announcement.getTitle() : "Binance Announcement";
+        long publishDate = announcement.getPublishDate() == null ? 0L : announcement.getPublishDate();
+        String recordKey = "announcement:" + publishDate + ":" + title;
+        NotificationMessage message = buildAnnouncementMessage(announcement);
+        send(recordKey, message, "announcement", announcement.getTopic(), title);
     }
 
     @Scheduled(fixedDelay = 5 * 60 * 1000L)
@@ -97,7 +67,7 @@ public class AlertNotificationService {
         sentRecords.entrySet().removeIf(entry -> currentTime - entry.getValue() > COOLDOWN_PERIOD);
         int removed = before - sentRecords.size();
         if (removed > 0) {
-            log.info("已清理过期告警发送记录，数量={}", removed);
+            log.info("瀹稿弶绔婚悶鍡氱箖閺堢喎鎲＄拃锕€褰傞柅浣筋唶瑜版洩绱濋弫浼村櫤={}", removed);
         }
     }
 
@@ -111,7 +81,7 @@ public class AlertNotificationService {
         return false;
     }
 
-    private NotificationMessage buildMessage(AlertSignal signal) {
+    private NotificationMessage buildSignalMessage(AlertSignal signal) {
         BinanceKlineDTO kline = signal.getKline();
         BigDecimal closePrice = decimal(kline.getClose(), 2);
         BigDecimal amplitude = calculateAmplitude(kline).multiply(new BigDecimal("100")).setScale(2, RoundingMode.HALF_UP);
@@ -127,7 +97,7 @@ public class AlertNotificationService {
                 .append("> Interval: ").append(interval).append("\n")
                 .append("> Close: ").append(closePrice).append(" USDT\n")
                 .append("> Amplitude: ").append(amplitude).append("%\n")
-                .append("> Quote Volume: ").append(volume).append(" 万USDT\n")
+                .append("> Quote Volume: ").append(volume).append(" 娑撳槮SDT\n")
                 .append("> Trigger: ").append(formatNullablePrice(signal.getTriggerPrice())).append("\n")
                 .append("> Invalidation: ").append(formatNullablePrice(signal.getInvalidationPrice())).append("\n")
                 .append("> Target: ").append(formatNullablePrice(signal.getTargetPrice())).append("\n")
@@ -144,7 +114,7 @@ public class AlertNotificationService {
                 .append("Interval: ").append(interval).append("\n")
                 .append("Close: ").append(closePrice).append(" USDT\n")
                 .append("Amplitude: ").append(amplitude).append("%\n")
-                .append("Quote Volume: ").append(volume).append(" 万USDT\n")
+                .append("Quote Volume: ").append(volume).append(" 娑撳槮SDT\n")
                 .append("Trigger: ").append(formatNullablePrice(signal.getTriggerPrice())).append("\n")
                 .append("Invalidation: ").append(formatNullablePrice(signal.getInvalidationPrice())).append("\n")
                 .append("Target: ").append(formatNullablePrice(signal.getTargetPrice())).append("\n")
@@ -156,6 +126,48 @@ public class AlertNotificationService {
                 .toString();
 
         return new NotificationMessage(markdownContent, plainTextContent);
+    }
+
+    private NotificationMessage buildAnnouncementMessage(BinanceAnnouncementDTO announcement) {
+        LocalDateTime publishTime = announcement.getPublishDate() == null
+                ? LocalDateTime.now()
+                : LocalDateTime.ofInstant(Instant.ofEpochMilli(announcement.getPublishDate()), ZoneId.systemDefault());
+        String topic = StringUtils.hasText(announcement.getTopic()) ? announcement.getTopic() : "com_announcement_en";
+        String catalogName = StringUtils.hasText(announcement.getCatalogName()) ? announcement.getCatalogName() : "-";
+        String title = StringUtils.hasText(announcement.getTitle()) ? announcement.getTitle() : "Binance Announcement";
+        String body = abbreviate(cleanText(announcement.getBody()), 900);
+        String disclaimer = abbreviate(cleanText(announcement.getDisclaimer()), 200);
+        String url = "https://www.binance.com/en/support/announcement";
+
+        StringBuilder markdownBuilder = new StringBuilder()
+                .append("Binance CMS Announcement\n")
+                .append("> Topic: ").append(topic).append("\n")
+                .append("> Catalog: ").append(catalogName).append("\n")
+                .append("> Published: ").append(MESSAGE_TIME_FORMATTER.format(publishTime)).append("\n")
+                .append("> Title: ").append(title).append("\n");
+        if (StringUtils.hasText(body)) {
+            markdownBuilder.append("> Body: ").append(body).append("\n");
+        }
+        if (StringUtils.hasText(disclaimer)) {
+            markdownBuilder.append("> Disclaimer: ").append(disclaimer).append("\n");
+        }
+        markdownBuilder.append("[Open Announcements](").append(url).append(")");
+
+        StringBuilder plainTextBuilder = new StringBuilder()
+                .append("Binance CMS Announcement\n")
+                .append("Topic: ").append(topic).append("\n")
+                .append("Catalog: ").append(catalogName).append("\n")
+                .append("Published: ").append(MESSAGE_TIME_FORMATTER.format(publishTime)).append("\n")
+                .append("Title: ").append(title).append("\n");
+        if (StringUtils.hasText(body)) {
+            plainTextBuilder.append("Body: ").append(body).append("\n");
+        }
+        if (StringUtils.hasText(disclaimer)) {
+            plainTextBuilder.append("Disclaimer: ").append(disclaimer).append("\n");
+        }
+        plainTextBuilder.append("Open Announcements: ").append(url);
+
+        return new NotificationMessage(markdownBuilder.toString(), plainTextBuilder.toString());
     }
 
     private String buildChartUrl(String symbol, String interval) {
@@ -199,4 +211,64 @@ public class AlertNotificationService {
         }
         return channelName.trim().toLowerCase(Locale.ROOT);
     }
+
+    private void send(String recordKey, NotificationMessage message, String category, String subject, String detail) {
+        if (!allowSend(recordKey)) {
+            log.info("Skip sending {} due to cooldown, recordKey={}, subject={}, detail={}",
+                    category,
+                    recordKey,
+                    subject,
+                    detail);
+            return;
+        }
+
+        if (CollectionUtils.isEmpty(alertNotifiers)) {
+            log.warn("No notification channels configured, skip sending {} for subject={}, detail={}",
+                    category,
+                    subject,
+                    detail);
+            return;
+        }
+
+        String selectedChannel = normalizeChannelName(notificationChannel);
+        AlertNotifier alertNotifier = notifierByChannel.get(selectedChannel);
+        if (alertNotifier == null) {
+            log.warn("No matched notifier for channel={}, availableChannels={}",
+                    selectedChannel,
+                    notifierByChannel.keySet());
+            return;
+        }
+
+        log.info("Sending {}, channel={}, subject={}, detail={}",
+                category,
+                selectedChannel,
+                subject,
+                detail);
+
+        try {
+            alertNotifier.send(message);
+        } catch (Exception e) {
+            log.error("Failed to send {}, channel={}, subject={}, detail={}",
+                    category,
+                    alertNotifier.channelName(),
+                    subject,
+                    detail,
+                    e);
+        }
+    }
+
+    private String cleanText(String value) {
+        if (!StringUtils.hasText(value)) {
+            return "";
+        }
+        return value.replaceAll("\\s+", " ").trim();
+    }
+
+    private String abbreviate(String value, int maxLength) {
+        if (!StringUtils.hasText(value) || value.length() <= maxLength) {
+            return value;
+        }
+        return value.substring(0, Math.max(0, maxLength - 3)) + "...";
+    }
 }
+

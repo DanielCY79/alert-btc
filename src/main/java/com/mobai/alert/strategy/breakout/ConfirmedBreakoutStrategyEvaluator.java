@@ -1,6 +1,6 @@
 package com.mobai.alert.strategy.breakout;
 
-import com.mobai.alert.access.dto.BinanceKlineDTO;
+import com.mobai.alert.access.binance.kline.dto.BinanceKlineDTO;
 import com.mobai.alert.state.signal.AlertSignal;
 import com.mobai.alert.state.signal.TradeDirection;
 import com.mobai.alert.strategy.shared.RangeContext;
@@ -13,17 +13,10 @@ import java.util.List;
 import java.util.Optional;
 
 /**
- * 确认突破策略。
+ * 已确认突破策略。
  *
- * 这类策略专门处理“区间真的被突破并被市场接受”的场景。
- * 它不是看到价格越过边界就算突破，而是要求同时满足：
- * 1. 收盘明确站到边界外；
- * 2. K线实体质量足够好；
- * 3. 收盘位置靠近突破方向一侧；
- * 4. 相对量能明显放大；
- * 5. 价格没有离边界拉得过远。
- *
- * 因此它比“碰一下就追”的突破逻辑更保守，但也更适合 BTC 这种假突破很多的市场。
+ * <p>这类信号要求价格、K 线形态和成交量同时确认，
+ * 目的是尽量过滤掉刚碰到边界就回来的假突破。</p>
  */
 public class ConfirmedBreakoutStrategyEvaluator {
 
@@ -31,24 +24,14 @@ public class ConfirmedBreakoutStrategyEvaluator {
     private static final String BREAKOUT_SHORT_TYPE = "CONFIRMED_BREAKOUT_SHORT";
 
     /**
-     * 区间向上确认突破。
-     *
-     * 中文理解：
-     * - 区间上沿被有效站上；
-     * - 不是影线刺破，而是收盘站上；
-     * - 并且放量、实体够强，说明上破被市场接受。
+     * 评估向上确认突破信号。
      */
     public Optional<AlertSignal> evaluateTrendBreakout(List<BinanceKlineDTO> klines, StrategySettings settings) {
         return evaluateConfirmedBreakout(klines, true, settings);
     }
 
     /**
-     * 区间向下确认跌破。
-     *
-     * 中文理解：
-     * - 区间下沿被有效跌破；
-     * - 收盘明确落到下沿之外；
-     * - 并且伴随较强的实体和放量，说明市场接受向下扩展。
+     * 评估向下确认跌破信号。
      */
     public Optional<AlertSignal> evaluateTrendBreakdown(List<BinanceKlineDTO> klines, StrategySettings settings) {
         return evaluateConfirmedBreakout(klines, false, settings);
@@ -76,25 +59,28 @@ public class ConfirmedBreakoutStrategyEvaluator {
                 ? boundary.multiply(StrategySupport.ONE.add(settings.breakoutCloseBuffer()))
                 : boundary.multiply(StrategySupport.ONE.subtract(settings.breakoutCloseBuffer()));
 
-        // 当前K线必须明确收在边界外，不接受“只刺穿一下”的假动作。
+        // 最新收盘价必须真正站上/跌破边界缓冲。
         if (bullishBreakout && close.compareTo(closeThreshold) <= 0) {
             return Optional.empty();
         }
         if (!bullishBreakout && close.compareTo(closeThreshold) >= 0) {
             return Optional.empty();
         }
-        // 前一根不能已经提前站稳边界外，否则这里更像延续而不是首次确认突破。
+
+        // 前一根 K 线仍在区间内，避免连续多根都在边界外的追价信号。
         if (bullishBreakout && previousClose.compareTo(closeThreshold) > 0) {
             return Optional.empty();
         }
         if (!bullishBreakout && previousClose.compareTo(closeThreshold) < 0) {
             return Optional.empty();
         }
-        // 实体占比要足够大，减少长影线、犹豫型K线带来的误判。
+
+        // 实体占比不够，通常说明突破力度不够坚决。
         if (StrategySupport.bodyRatio(latest).compareTo(settings.breakoutBodyRatioThreshold()) < 0) {
             return Optional.empty();
         }
-        // 收盘位置必须偏向突破方向，避免表面突破、实际收得很虚。
+
+        // 收盘位置要尽量靠近突破方向的一侧。
         if (bullishBreakout && StrategySupport.closeLocation(latest).compareTo(new BigDecimal("0.65")) < 0) {
             return Optional.empty();
         }
@@ -110,15 +96,14 @@ public class ConfirmedBreakoutStrategyEvaluator {
 
         BigDecimal averageVolume = StrategySupport.averageVolume(range.window());
         BigDecimal volumeRatio = StrategySupport.ratio(StrategySupport.volumeOf(latest), averageVolume);
-        // 放量是市场“接受突破”的重要证据之一。
         if (volumeRatio.compareTo(settings.breakoutVolumeMultiplier()) < 0) {
             return Optional.empty();
         }
 
+        // 避免离边界过远的过度延伸追涨/追空。
         BigDecimal extensionCap = bullishBreakout
                 ? boundary.multiply(StrategySupport.ONE.add(settings.breakoutMaxExtension()))
                 : boundary.multiply(StrategySupport.ONE.subtract(settings.breakoutMaxExtension()));
-        // 如果已经远离突破位太多，再追进去通常不划算。
         if (bullishBreakout && close.compareTo(extensionCap) > 0) {
             return Optional.empty();
         }
@@ -134,12 +119,12 @@ public class ConfirmedBreakoutStrategyEvaluator {
                 : range.support().subtract(range.resistance().subtract(range.support()));
         String type = bullishBreakout ? BREAKOUT_LONG_TYPE : BREAKOUT_SHORT_TYPE;
         String summary = bullishBreakout
-                ? String.format("成熟区间被向上有效突破，当前K线实体强、收盘高、并伴随 %.2fx 放量，说明市场正在接受向上扩展。", volumeRatio.setScale(2, RoundingMode.HALF_UP))
-                : String.format("成熟区间被向下有效跌破，当前K线实体强、收盘弱、并伴随 %.2fx 放量，说明市场正在接受向下扩展。", volumeRatio.setScale(2, RoundingMode.HALF_UP));
+                ? String.format("价格向上有效突破区间，成交量放大至 %.2fx，属于确认型突破。", volumeRatio.setScale(2, RoundingMode.HALF_UP))
+                : String.format("价格向下有效跌破区间，成交量放大至 %.2fx，属于确认型跌破。", volumeRatio.setScale(2, RoundingMode.HALF_UP));
 
         return Optional.of(new AlertSignal(
                 bullishBreakout ? TradeDirection.LONG : TradeDirection.SHORT,
-                bullishBreakout ? "BTC 区间确认突破做多" : "BTC 区间确认跌破做空",
+                bullishBreakout ? "BTC 确认突破做多信号" : "BTC 确认跌破做空信号",
                 latest,
                 type,
                 summary,
