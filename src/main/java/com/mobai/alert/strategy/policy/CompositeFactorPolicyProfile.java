@@ -23,6 +23,27 @@ public record CompositeFactorPolicyProfile(boolean enabled,
                                            PolicyWeights breakoutWeights,
                                            PolicyWeights pullbackWeights) {
 
+    public CompositeFactorPolicyProfile withEnabled(boolean value) {
+        return new CompositeFactorPolicyProfile(
+                value,
+                baseScore,
+                rangeFailureMinScore,
+                breakoutMinScore,
+                pullbackMinScore,
+                maxRegimeRisk,
+                missingDerivativePenalty,
+                crowdingExtreme,
+                negativeBreakoutVeto,
+                negativeTrendVeto,
+                negativeEventVeto,
+                eventRiskGate,
+                crowdedBreakoutRiskGate,
+                rangeFailureWeights,
+                breakoutWeights,
+                pullbackWeights
+        );
+    }
+
     /**
      * 返回修改基础分后的新画像。
      */

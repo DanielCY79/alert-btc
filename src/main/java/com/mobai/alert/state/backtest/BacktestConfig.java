@@ -34,11 +34,22 @@ public record BacktestConfig(String symbol,
                              BigDecimal pullbackTouchTolerance,
                              BigDecimal pullbackHoldBuffer,
                              BigDecimal pullbackMaxVolumeRatio,
+                             BigDecimal breakoutFollowThroughCloseBuffer,
+                             BigDecimal breakoutFollowThroughMinBodyRatio,
+                             BigDecimal breakoutFollowThroughMinCloseLocation,
+                             BigDecimal breakoutFollowThroughMinVolumeRatio,
                              long breakoutRecordTtlMs,
                              int rangeHoldingBars,
                              int breakoutHoldingBars,
                              int pullbackHoldingBars,
                              BigDecimal fallbackTargetMultiple,
+                             BigDecimal scaleOutTriggerR,
+                             BigDecimal scaleOutFraction,
+                             BigDecimal trailingActivationR,
+                             BigDecimal trailingDistanceR,
+                             int pyramidMaxAdds,
+                             BigDecimal pyramidTriggerR,
+                             BigDecimal pyramidAddFraction,
                              CompositeFactorPolicyProfile policyProfile) {
 
     /**
@@ -49,7 +60,11 @@ public record BacktestConfig(String symbol,
                 rangeEdgeTolerance, requiredEdgeTouches, overlapThreshold, minOverlapBars, maFlatThreshold, breakoutCloseBuffer,
                 breakoutVolumeMultiplier, breakoutBodyRatioThreshold, breakoutMaxExtension, breakoutFailureBuffer, failureProbeBuffer,
                 failureReentryBuffer, failureMinWickBodyRatio, pullbackTouchTolerance, pullbackHoldBuffer, pullbackMaxVolumeRatio,
-                breakoutRecordTtlMs, rangeHoldingBars, breakoutHoldingBars, pullbackHoldingBars, fallbackTargetMultiple, policyProfile);
+                breakoutFollowThroughCloseBuffer, breakoutFollowThroughMinBodyRatio, breakoutFollowThroughMinCloseLocation,
+                breakoutFollowThroughMinVolumeRatio,
+                breakoutRecordTtlMs, rangeHoldingBars, breakoutHoldingBars, pullbackHoldingBars, fallbackTargetMultiple,
+                scaleOutTriggerR, scaleOutFraction, trailingActivationR, trailingDistanceR, pyramidMaxAdds, pyramidTriggerR,
+                pyramidAddFraction, policyProfile);
     }
 
     /**
@@ -60,7 +75,11 @@ public record BacktestConfig(String symbol,
                 rangeEdgeTolerance, requiredEdgeTouches, overlapThreshold, minOverlapBars, maFlatThreshold, breakoutCloseBuffer,
                 value, breakoutBodyRatioThreshold, breakoutMaxExtension, breakoutFailureBuffer, failureProbeBuffer,
                 failureReentryBuffer, failureMinWickBodyRatio, pullbackTouchTolerance, pullbackHoldBuffer, pullbackMaxVolumeRatio,
-                breakoutRecordTtlMs, rangeHoldingBars, breakoutHoldingBars, pullbackHoldingBars, fallbackTargetMultiple, policyProfile);
+                breakoutFollowThroughCloseBuffer, breakoutFollowThroughMinBodyRatio, breakoutFollowThroughMinCloseLocation,
+                breakoutFollowThroughMinVolumeRatio,
+                breakoutRecordTtlMs, rangeHoldingBars, breakoutHoldingBars, pullbackHoldingBars, fallbackTargetMultiple,
+                scaleOutTriggerR, scaleOutFraction, trailingActivationR, trailingDistanceR, pyramidMaxAdds, pyramidTriggerR,
+                pyramidAddFraction, policyProfile);
     }
 
     /**
@@ -71,7 +90,11 @@ public record BacktestConfig(String symbol,
                 rangeEdgeTolerance, requiredEdgeTouches, overlapThreshold, minOverlapBars, maFlatThreshold, value,
                 breakoutVolumeMultiplier, breakoutBodyRatioThreshold, breakoutMaxExtension, breakoutFailureBuffer, failureProbeBuffer,
                 failureReentryBuffer, failureMinWickBodyRatio, pullbackTouchTolerance, pullbackHoldBuffer, pullbackMaxVolumeRatio,
-                breakoutRecordTtlMs, rangeHoldingBars, breakoutHoldingBars, pullbackHoldingBars, fallbackTargetMultiple, policyProfile);
+                breakoutFollowThroughCloseBuffer, breakoutFollowThroughMinBodyRatio, breakoutFollowThroughMinCloseLocation,
+                breakoutFollowThroughMinVolumeRatio,
+                breakoutRecordTtlMs, rangeHoldingBars, breakoutHoldingBars, pullbackHoldingBars, fallbackTargetMultiple,
+                scaleOutTriggerR, scaleOutFraction, trailingActivationR, trailingDistanceR, pyramidMaxAdds, pyramidTriggerR,
+                pyramidAddFraction, policyProfile);
     }
 
     /**
@@ -82,7 +105,11 @@ public record BacktestConfig(String symbol,
                 rangeEdgeTolerance, requiredEdgeTouches, overlapThreshold, minOverlapBars, maFlatThreshold, breakoutCloseBuffer,
                 breakoutVolumeMultiplier, breakoutBodyRatioThreshold, breakoutMaxExtension, breakoutFailureBuffer, failureProbeBuffer,
                 failureReentryBuffer, failureMinWickBodyRatio, pullbackTouchTolerance, pullbackHoldBuffer, pullbackMaxVolumeRatio,
-                breakoutRecordTtlMs, rangeHoldingBars, breakoutHoldingBars, pullbackHoldingBars, fallbackTargetMultiple, value);
+                breakoutFollowThroughCloseBuffer, breakoutFollowThroughMinBodyRatio, breakoutFollowThroughMinCloseLocation,
+                breakoutFollowThroughMinVolumeRatio,
+                breakoutRecordTtlMs, rangeHoldingBars, breakoutHoldingBars, pullbackHoldingBars, fallbackTargetMultiple,
+                scaleOutTriggerR, scaleOutFraction, trailingActivationR, trailingDistanceR, pyramidMaxAdds, pyramidTriggerR,
+                pyramidAddFraction, value);
     }
 
     public BacktestConfig withPolicyBaseScore(BigDecimal value) {

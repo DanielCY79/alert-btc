@@ -6,9 +6,14 @@ import com.mobai.alert.feature.model.FeatureSnapshot;
 import com.mobai.alert.feature.service.MarketFeatureSnapshotService;
 import com.mobai.alert.notification.AlertNotificationService;
 import com.mobai.alert.state.runtime.BreakoutRecord;
+import com.mobai.alert.state.runtime.MarketState;
+import com.mobai.alert.state.runtime.RuntimePosition;
 import com.mobai.alert.state.signal.AlertSignal;
+import com.mobai.alert.state.signal.TradeDirection;
 import com.mobai.alert.strategy.AlertRuleEvaluator;
 import com.mobai.alert.strategy.policy.CompositeFactorSignalPolicy;
+import com.mobai.alert.strategy.policy.MarketStateDecision;
+import com.mobai.alert.strategy.policy.MarketStateMachine;
 import com.mobai.alert.strategy.policy.SignalPolicyDecision;
 import com.mobai.alert.strategy.shared.StrategySupport;
 import org.slf4j.Logger;
@@ -23,6 +28,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
+import java.math.BigDecimal;
 
 /**
  * 单个交易对的监控执行器。
@@ -45,23 +51,67 @@ public class AlertSymbolProcessor {
     @Value("${monitoring.strategy.breakout.record.ttl.ms:43200000}")
     private long breakoutRecordTtlMs;
 
+    @Value("${monitoring.strategy.breakout.record.max-bars:24}")
+    private int breakoutRecordMaxBars;
+
+    @Value("${monitoring.strategy.breakout.follow-through.max-bars:2}")
+    private int breakoutFollowThroughMaxBars;
+
+    @Value("${monitoring.position.failed-follow-through.max-bars:2}")
+    private int failedFollowThroughMaxBars;
+
+    @Value("${monitoring.position.failed-follow-through.adverse-r:0.35}")
+    private BigDecimal failedFollowThroughAdverseR;
+
+    @Value("${monitoring.position.failed-follow-through.min-body-ratio:0.40}")
+    private BigDecimal failedFollowThroughMinBodyRatio;
+
+    @Value("${monitoring.position.failed-follow-through.close-location:0.35}")
+    private BigDecimal failedFollowThroughCloseLocation;
+
+    @Value("${monitoring.position.scale-out.trigger-r:1.00}")
+    private BigDecimal scaleOutTriggerR;
+
+    @Value("${monitoring.position.scale-out.fraction:0.50}")
+    private BigDecimal scaleOutFraction;
+
+    @Value("${monitoring.position.trailing.activation-r:1.20}")
+    private BigDecimal trailingActivationR;
+
+    @Value("${monitoring.position.trailing.distance-r:1.00}")
+    private BigDecimal trailingDistanceR;
+
+    @Value("${monitoring.position.pyramid.max-adds:1}")
+    private int pyramidMaxAdds;
+
+    @Value("${monitoring.position.pyramid.trigger-r:1.60}")
+    private BigDecimal pyramidTriggerR;
+
+    @Value("${monitoring.position.pyramid.add-size:0.35}")
+    private BigDecimal pyramidAddFraction;
+
     private final BinanceApi binanceApi;
     private final AlertRuleEvaluator alertRuleEvaluator;
     private final AlertNotificationService alertNotificationService;
     private final MarketFeatureSnapshotService marketFeatureSnapshotService;
     private final CompositeFactorSignalPolicy compositeFactorSignalPolicy;
+    private final MarketStateMachine marketStateMachine;
     private final Map<String, BreakoutRecord> breakoutRecords = new ConcurrentHashMap<>();
+    private final Map<String, MarketState> marketStates = new ConcurrentHashMap<>();
+    private final Map<String, RuntimePosition> activePositions = new ConcurrentHashMap<>();
 
     public AlertSymbolProcessor(BinanceApi binanceApi,
                                 AlertRuleEvaluator alertRuleEvaluator,
                                 AlertNotificationService alertNotificationService,
                                 MarketFeatureSnapshotService marketFeatureSnapshotService,
-                                CompositeFactorSignalPolicy compositeFactorSignalPolicy) {
+                                CompositeFactorSignalPolicy compositeFactorSignalPolicy,
+                                MarketStateMachine marketStateMachine) {
         this.binanceApi = binanceApi;
         this.alertRuleEvaluator = alertRuleEvaluator;
         this.alertNotificationService = alertNotificationService;
         this.marketFeatureSnapshotService = marketFeatureSnapshotService;
         this.compositeFactorSignalPolicy = compositeFactorSignalPolicy;
+        this.marketStateMachine = marketStateMachine;
     }
 
     /**
@@ -90,7 +140,12 @@ public class AlertSymbolProcessor {
                 klines.size(),
                 klines.get(klines.size() - 1).getEndTime());
 
+        if (sendExitIfPresent(symbol, klines)) {
+            return;
+        }
+
         FeatureSnapshot featureSnapshot = marketFeatureSnapshotService.buildSnapshot(symbol, klineInterval, klines);
+        applyMarketState(symbol, featureSnapshot);
         logFeatureSnapshot(featureSnapshot);
 
         if (sendIfPresent(alertRuleEvaluator.evaluateRangeFailedBreakdownLong(klines), featureSnapshot)) {
@@ -100,32 +155,60 @@ public class AlertSymbolProcessor {
             return;
         }
 
-        boolean breakoutTriggered = alertRuleEvaluator.evaluateTrendBreakout(klines)
-                .map(signal -> recordBreakout(signal, longBreakoutKey(), shortBreakoutKey(), featureSnapshot))
-                .orElse(false);
-        if (breakoutTriggered) {
+        if (confirmPendingBreakout(klines, longBreakoutKey(), shortBreakoutKey(), featureSnapshot)) {
+            return;
+        }
+        if (confirmPendingBreakout(klines, shortBreakoutKey(), longBreakoutKey(), featureSnapshot)) {
             return;
         }
 
-        breakoutTriggered = alertRuleEvaluator.evaluateTrendBreakdown(klines)
-                .map(signal -> recordBreakout(signal, shortBreakoutKey(), longBreakoutKey(), featureSnapshot))
+        boolean breakoutCaptured = alertRuleEvaluator.evaluateTrendBreakout(klines)
+                .map(signal -> rememberBreakoutCandidate(signal, longBreakoutKey(), shortBreakoutKey(), true))
                 .orElse(false);
-        if (breakoutTriggered) {
+        if (breakoutCaptured) {
             return;
         }
 
-        BreakoutRecord longBreakout = breakoutRecords.get(longBreakoutKey());
+        breakoutCaptured = alertRuleEvaluator.evaluateTrendBreakdown(klines)
+                .map(signal -> rememberBreakoutCandidate(signal, shortBreakoutKey(), longBreakoutKey(), false))
+                .orElse(false);
+        if (breakoutCaptured) {
+            return;
+        }
+
+        BreakoutRecord longBreakout = activeConfirmedBreakout(klines, longBreakoutKey());
         if (longBreakout != null
                 && sendIfPresent(
                 alertRuleEvaluator.evaluateBreakoutPullback(klines, longBreakout.breakoutLevel(), longBreakout.targetPrice(), true),
                 featureSnapshot)) {
             return;
         }
+        if (supportsSecondEntry(featureSnapshot)
+                && sendIfPresent(
+                alertRuleEvaluator.evaluateSecondEntryLong(
+                        klines,
+                        longBreakout == null ? null : longBreakout.breakoutLevel(),
+                        longBreakout == null ? null : longBreakout.targetPrice()
+                ),
+                featureSnapshot)) {
+            return;
+        }
 
-        BreakoutRecord shortBreakout = breakoutRecords.get(shortBreakoutKey());
-        if (shortBreakout != null) {
-            sendIfPresent(
+        BreakoutRecord shortBreakout = activeConfirmedBreakout(klines, shortBreakoutKey());
+        if (shortBreakout != null
+                && sendIfPresent(
                     alertRuleEvaluator.evaluateBreakoutPullback(klines, shortBreakout.breakoutLevel(), shortBreakout.targetPrice(), false),
+                    featureSnapshot
+            )) {
+            return;
+        }
+        if (supportsSecondEntry(featureSnapshot)) {
+            sendIfPresent(
+                    alertRuleEvaluator.evaluateSecondEntryShort(
+                            klines,
+                            shortBreakout == null ? null : shortBreakout.breakoutLevel(),
+                            shortBreakout == null ? null : shortBreakout.targetPrice()
+                    ),
                     featureSnapshot
             );
         }
@@ -138,7 +221,7 @@ public class AlertSymbolProcessor {
     public void cleanupExpiredBreakoutRecords() {
         long currentTime = System.currentTimeMillis();
         int before = breakoutRecords.size();
-        breakoutRecords.entrySet().removeIf(entry -> currentTime - entry.getValue().timestamp() > breakoutRecordTtlMs);
+        breakoutRecords.entrySet().removeIf(entry -> currentTime - entry.getValue().breakoutTime() > breakoutRecordTtlMs);
         int removed = before - breakoutRecords.size();
         if (removed > 0) {
             log.info("Removed expired breakout memories, count={}", removed);
@@ -195,40 +278,143 @@ public class AlertSymbolProcessor {
                 signal.getTargetPrice(),
                 StrategySupport.scaleOrNull(signal.getContextScore()));
         alertNotificationService.send(signal);
+        rememberManagedRuntimePosition(signal);
         return true;
     }
 
     /**
      * 对通过过滤的突破信号做发送与缓存，供后续回踩策略继续使用。
      */
-    private boolean recordBreakout(AlertSignal signal, String recordKey, String oppositeKey, FeatureSnapshot featureSnapshot) {
-        SignalPolicyDecision decision = compositeFactorSignalPolicy.evaluate(signal, featureSnapshot);
-        if (!decision.allowed()) {
-            log.info("Breakout blocked by composite policy, symbol={}, signalType={}, direction={}, score={}, reasons={}",
-                    signal.getKline().getSymbol(),
-                    signal.getType(),
-                    signal.getDirection(),
-                    StrategySupport.scaleOrNull(decision.score()),
-                    String.join(" | ", decision.reasons()));
+    private boolean rememberBreakoutCandidate(AlertSignal signal,
+                                              String recordKey,
+                                              String oppositeKey,
+                                              boolean bullishBreakout) {
+        BreakoutRecord breakoutRecord = new BreakoutRecord(
+                signal.getTriggerPrice(),
+                signal.getInvalidationPrice(),
+                signal.getTargetPrice(),
+                signal.getKline().getEndTime(),
+                bullishBreakout,
+                false,
+                null
+        );
+        breakoutRecords.put(recordKey, breakoutRecord);
+        breakoutRecords.remove(oppositeKey);
+        log.info("Stored pending breakout memory, key={}, breakoutLevel={}, invalidation={}, target={}, bullish={}",
+                recordKey,
+                breakoutRecord.breakoutLevel(),
+                breakoutRecord.invalidationPrice(),
+                breakoutRecord.targetPrice(),
+                breakoutRecord.bullish());
+        return true;
+    }
+
+    private boolean confirmPendingBreakout(List<BinanceKlineDTO> klines,
+                                           String recordKey,
+                                           String oppositeKey,
+                                           FeatureSnapshot featureSnapshot) {
+        BreakoutRecord breakoutRecord = breakoutRecords.get(recordKey);
+        if (breakoutRecord == null || breakoutRecord.followThroughConfirmed()) {
             return false;
         }
 
+        int barsSinceBreakout = barsSinceBreakout(klines, breakoutRecord.breakoutTime());
+        if (barsSinceBreakout <= 0) {
+            return false;
+        }
+        if (barsSinceBreakout > breakoutFollowThroughMaxBars || isBreakoutRejected(klines, breakoutRecord)) {
+            breakoutRecords.remove(recordKey);
+            log.info("Dropped pending breakout memory, key={}, barsSinceBreakout={}, rejected={}",
+                    recordKey,
+                    barsSinceBreakout,
+                    isBreakoutRejected(klines, breakoutRecord));
+            return false;
+        }
+
+        Optional<AlertSignal> followThroughSignal = alertRuleEvaluator.evaluateBreakoutFollowThrough(
+                klines,
+                breakoutRecord.breakoutLevel(),
+                breakoutRecord.invalidationPrice(),
+                breakoutRecord.targetPrice(),
+                breakoutRecord.bullish()
+        );
+        if (followThroughSignal.isEmpty()) {
+            return false;
+        }
+
+        BreakoutRecord confirmedRecord = breakoutRecord.confirm(followThroughSignal.get().getKline().getEndTime());
+        breakoutRecords.put(recordKey, confirmedRecord);
+        breakoutRecords.remove(oppositeKey);
+        log.info("Breakout follow-through confirmed, key={}, breakoutLevel={}, confirmationTime={}",
+                recordKey,
+                confirmedRecord.breakoutLevel(),
+                confirmedRecord.followThroughTime());
+
+        SignalPolicyDecision decision = compositeFactorSignalPolicy.evaluate(followThroughSignal.get(), featureSnapshot);
+        if (!decision.allowed()) {
+            log.info("Confirmed breakout blocked by composite policy, symbol={}, signalType={}, direction={}, score={}, reasons={}",
+                    followThroughSignal.get().getKline().getSymbol(),
+                    followThroughSignal.get().getType(),
+                    followThroughSignal.get().getDirection(),
+                    StrategySupport.scaleOrNull(decision.score()),
+                    String.join(" | ", decision.reasons()));
+            return true;
+        }
+
         AlertSignal qualifiedSignal = decision.signal();
-        log.info("Breakout approved, symbol={}, signalType={}, breakoutLevel={}, target={}, compositeScore={}",
+        log.info("Confirmed breakout approved, symbol={}, signalType={}, breakoutLevel={}, target={}, compositeScore={}",
                 qualifiedSignal.getKline().getSymbol(),
                 qualifiedSignal.getType(),
                 qualifiedSignal.getTriggerPrice(),
                 qualifiedSignal.getTargetPrice(),
                 StrategySupport.scaleOrNull(qualifiedSignal.getContextScore()));
         alertNotificationService.send(qualifiedSignal);
-        breakoutRecords.put(recordKey, new BreakoutRecord(
-                qualifiedSignal.getTriggerPrice(),
-                qualifiedSignal.getTargetPrice(),
-                System.currentTimeMillis()
-        ));
-        breakoutRecords.remove(oppositeKey);
-        log.info("Stored breakout memory, currentKey={}, clearedOppositeKey={}", recordKey, oppositeKey);
+        rememberManagedRuntimePosition(qualifiedSignal);
         return true;
+    }
+
+    private BreakoutRecord activeConfirmedBreakout(List<BinanceKlineDTO> klines, String recordKey) {
+        BreakoutRecord breakoutRecord = breakoutRecords.get(recordKey);
+        if (breakoutRecord == null) {
+            return null;
+        }
+        if (!breakoutRecord.followThroughConfirmed()) {
+            return null;
+        }
+        if (isBreakoutMemoryExpired(klines, breakoutRecord)) {
+            breakoutRecords.remove(recordKey);
+            return null;
+        }
+        return breakoutRecord;
+    }
+
+    private boolean isBreakoutMemoryExpired(List<BinanceKlineDTO> klines, BreakoutRecord breakoutRecord) {
+        if (System.currentTimeMillis() - breakoutRecord.breakoutTime() > breakoutRecordTtlMs) {
+            return true;
+        }
+        return barsSinceBreakout(klines, breakoutRecord.breakoutTime()) > breakoutRecordMaxBars;
+    }
+
+    private int barsSinceBreakout(List<BinanceKlineDTO> klines, long breakoutTime) {
+        List<BinanceKlineDTO> closedKlines = StrategySupport.closedKlines(klines);
+        int count = 0;
+        for (BinanceKlineDTO kline : closedKlines) {
+            if (kline.getEndTime() > breakoutTime) {
+                count++;
+            }
+        }
+        return count;
+    }
+
+    private boolean isBreakoutRejected(List<BinanceKlineDTO> klines, BreakoutRecord breakoutRecord) {
+        List<BinanceKlineDTO> closedKlines = StrategySupport.closedKlines(klines);
+        if (closedKlines.isEmpty()) {
+            return false;
+        }
+        BigDecimal latestClose = StrategySupport.valueOf(StrategySupport.last(closedKlines).getClose());
+        return breakoutRecord.bullish()
+                ? latestClose.compareTo(breakoutRecord.invalidationPrice()) <= 0
+                : latestClose.compareTo(breakoutRecord.invalidationPrice()) >= 0;
     }
 
     /**
@@ -248,14 +434,36 @@ public class AlertSymbolProcessor {
     /**
      * 记录特征快照摘要，便于排查因子是否准备齐全。
      */
+    private void applyMarketState(String symbol, FeatureSnapshot featureSnapshot) {
+        if (featureSnapshot == null) {
+            return;
+        }
+
+        MarketState previousState = marketStates.getOrDefault(symbol, MarketState.UNKNOWN);
+        MarketStateDecision decision = marketStateMachine.evaluate(featureSnapshot, previousState);
+        featureSnapshot.setMarketState(decision.state());
+        featureSnapshot.setMarketStateComment(decision.comment());
+        marketStates.put(symbol, decision.state());
+
+        if (previousState != decision.state()) {
+            log.info("Market state transitioned, symbol={}, previousState={}, currentState={}, comment={}",
+                    symbol,
+                    previousState,
+                    decision.state(),
+                    decision.comment());
+        }
+    }
+
     private void logFeatureSnapshot(FeatureSnapshot featureSnapshot) {
         if (featureSnapshot == null || featureSnapshot.getCompositeFactors() == null || featureSnapshot.getQuality() == null) {
             return;
         }
 
-        log.info("Feature snapshot ready, symbol={}, asOfTime={}, trendBias={}, breakoutConfirmation={}, crowding={}, eventBias={}, regimeRisk={}, priceReady={}, derivativeReady={}, relevantEvents={}",
+        log.info("Feature snapshot ready, symbol={}, asOfTime={}, marketState={}, stateComment={}, trendBias={}, breakoutConfirmation={}, crowding={}, eventBias={}, regimeRisk={}, priceReady={}, derivativeReady={}, relevantEvents={}",
                 featureSnapshot.getSymbol(),
                 featureSnapshot.getAsOfTime(),
+                featureSnapshot.getMarketState(),
+                featureSnapshot.getMarketStateComment(),
                 StrategySupport.scaleOrNull(featureSnapshot.getCompositeFactors().getTrendBiasScore()),
                 StrategySupport.scaleOrNull(featureSnapshot.getCompositeFactors().getBreakoutConfirmationScore()),
                 StrategySupport.scaleOrNull(featureSnapshot.getCompositeFactors().getCrowdingScore()),
@@ -264,5 +472,498 @@ public class AlertSymbolProcessor {
                 featureSnapshot.getQuality().isPriceReady(),
                 featureSnapshot.getQuality().isDerivativeReady(),
                 featureSnapshot.getQuality().getRelevantEventCount());
+    }
+
+    private boolean sendExitIfPresent(String symbol, List<BinanceKlineDTO> klines) {
+        RuntimePosition activePosition = activePositions.get(symbol);
+        if (activePosition == null || CollectionUtils.isEmpty(klines) || klines.size() < 2) {
+            return false;
+        }
+
+        AlertSignal pendingSignal = null;
+        List<BinanceKlineDTO> closedKlines = StrategySupport.closedKlines(klines);
+        for (BinanceKlineDTO closedBar : closedKlines) {
+            if (!activePosition.shouldProcessClosedBar(closedBar.getEndTime())) {
+                continue;
+            }
+            RuntimeManagementEvent event = evaluateClosedRuntimeBar(symbol, klines, closedBar, activePosition);
+            if (event.closePosition()) {
+                activePositions.remove(symbol);
+                sendRuntimeManagementSignal(symbol, activePosition, event.signal());
+                return true;
+            }
+            if (event.signal() != null) {
+                pendingSignal = event.signal();
+            }
+        }
+
+        RuntimeManagementEvent liveEvent = evaluateLiveRuntimeBar(symbol, klines, StrategySupport.last(klines), activePosition);
+        if (liveEvent.closePosition()) {
+            activePositions.remove(symbol);
+            sendRuntimeManagementSignal(symbol, activePosition, liveEvent.signal());
+            return true;
+        }
+        if (liveEvent.signal() != null) {
+            pendingSignal = liveEvent.signal();
+        }
+
+        if (pendingSignal == null) {
+            return false;
+        }
+
+        sendRuntimeManagementSignal(symbol, activePosition, pendingSignal);
+        return true;
+    }
+
+    private boolean isFailedFollowThrough(BinanceKlineDTO latest, RuntimePosition activePosition, int barsSinceEntry) {
+        BigDecimal riskPerUnit = activePosition.riskPerUnit();
+        if (riskPerUnit.compareTo(BigDecimal.ZERO) <= 0
+                || activePosition.direction() == null
+                || barsSinceEntry <= 0
+                || barsSinceEntry > failedFollowThroughMaxBars) {
+            return false;
+        }
+
+        BigDecimal latestClose = StrategySupport.valueOf(latest.getClose());
+        BigDecimal adverseThreshold = riskPerUnit.multiply(failedFollowThroughAdverseR);
+        BigDecimal bodyRatio = StrategySupport.bodyRatio(latest);
+        BigDecimal closeLocation = StrategySupport.closeLocation(latest);
+        if (activePosition.direction() == TradeDirection.LONG) {
+            return latestClose.compareTo(activePosition.entryPrice().subtract(adverseThreshold)) <= 0
+                    && StrategySupport.isBearish(latest)
+                    && bodyRatio.compareTo(failedFollowThroughMinBodyRatio) >= 0
+                    && closeLocation.compareTo(failedFollowThroughCloseLocation) <= 0;
+        }
+
+        BigDecimal strongOppositeClose = BigDecimal.ONE.subtract(failedFollowThroughCloseLocation);
+        return latestClose.compareTo(activePosition.entryPrice().add(adverseThreshold)) >= 0
+                && StrategySupport.isBullish(latest)
+                && bodyRatio.compareTo(failedFollowThroughMinBodyRatio) >= 0
+                && closeLocation.compareTo(strongOppositeClose) >= 0;
+    }
+
+    private AlertSignal buildFailedFollowThroughExitSignal(String symbol,
+                                                           List<BinanceKlineDTO> klines,
+                                                           BinanceKlineDTO latest,
+                                                           RuntimePosition activePosition,
+                                                           int barsSinceEntry) {
+        BigDecimal averageVolume = StrategySupport.averageVolume(
+                StrategySupport.trailingWindow(
+                        StrategySupport.closedKlines(klines),
+                        Math.min(10, Math.max(2, StrategySupport.closedKlines(klines).size() - 1)),
+                        1
+                )
+        );
+        BigDecimal volumeRatio = StrategySupport.ratio(StrategySupport.volumeOf(latest), averageVolume);
+        String directionLabel = activePosition.direction() == TradeDirection.LONG ? "做多" : "做空";
+        String summary = String.format(
+                "前序 %s 在入场后第 %d 根 K 线出现 failed follow-through，当前应优先结束 %s 计划。",
+                activePosition.signalType(),
+                barsSinceEntry,
+                directionLabel
+        );
+        return new AlertSignal(
+                activePosition.direction(),
+                symbol + " failed follow-through 提前离场",
+                latest,
+                "EXIT_FAILED_FOLLOW_THROUGH_" + activePosition.direction().name(),
+                summary,
+                StrategySupport.valueOf(latest.getClose()).setScale(2, java.math.RoundingMode.HALF_UP),
+                activePosition.stopPrice() == null ? null : activePosition.stopPrice().setScale(2, java.math.RoundingMode.HALF_UP),
+                activePosition.targetPrice() == null ? null : activePosition.targetPrice().setScale(2, java.math.RoundingMode.HALF_UP),
+                StrategySupport.scaleOrNull(volumeRatio),
+                null,
+                "entryType=" + activePosition.signalType()
+                        + " | entryPrice=" + StrategySupport.scaleOrNull(activePosition.entryPrice())
+                        + " | barsSinceEntry=" + barsSinceEntry
+        );
+    }
+
+    private RuntimeManagementEvent evaluateClosedRuntimeBar(String symbol,
+                                                            List<BinanceKlineDTO> klines,
+                                                            BinanceKlineDTO closedBar,
+                                                            RuntimePosition activePosition) {
+        RuntimeManagementEvent priceEvent = evaluateRuntimeBar(symbol, klines, closedBar, activePosition);
+        if (priceEvent.closePosition()) {
+            return priceEvent;
+        }
+
+        int heldBars = activePosition.closedBarsSinceEntry() + 1;
+        if (isFailedFollowThrough(closedBar, activePosition, heldBars)) {
+            return RuntimeManagementEvent.close(
+                    buildManagedFailedFollowThroughExitSignal(symbol, klines, closedBar, activePosition, heldBars)
+            );
+        }
+
+        activePosition.updateAfterClosedBar(
+                StrategySupport.valueOf(closedBar.getHigh()),
+                StrategySupport.valueOf(closedBar.getLow()),
+                StrategySupport.valueOf(closedBar.getClose()),
+                closedBar.getEndTime()
+        );
+
+        if (!priceEvent.scaleOutTriggered()) {
+            return RuntimeManagementEvent.none();
+        }
+        return RuntimeManagementEvent.alert(buildScaleOutSignal(symbol, klines, closedBar, activePosition));
+    }
+
+    private RuntimeManagementEvent evaluateLiveRuntimeBar(String symbol,
+                                                          List<BinanceKlineDTO> klines,
+                                                          BinanceKlineDTO liveBar,
+                                                          RuntimePosition activePosition) {
+        RuntimeManagementEvent priceEvent = evaluateRuntimeBar(symbol, klines, liveBar, activePosition);
+        if (priceEvent.closePosition()) {
+            return priceEvent;
+        }
+        if (!priceEvent.scaleOutTriggered()) {
+            return RuntimeManagementEvent.none();
+        }
+        return RuntimeManagementEvent.alert(buildScaleOutSignal(symbol, klines, liveBar, activePosition));
+    }
+
+    private RuntimeManagementEvent evaluateRuntimeBar(String symbol,
+                                                      List<BinanceKlineDTO> klines,
+                                                      BinanceKlineDTO bar,
+                                                      RuntimePosition activePosition) {
+        if (bar == null || activePosition.direction() == null || activePosition.stopPrice() == null || activePosition.targetPrice() == null) {
+            return RuntimeManagementEvent.none();
+        }
+
+        BigDecimal open = StrategySupport.valueOf(bar.getOpen());
+        BigDecimal high = StrategySupport.valueOf(bar.getHigh());
+        BigDecimal low = StrategySupport.valueOf(bar.getLow());
+        boolean scaleOutTriggered = false;
+
+        if (activePosition.direction() == TradeDirection.LONG) {
+            if (open.compareTo(activePosition.stopPrice()) <= 0) {
+                return RuntimeManagementEvent.close(
+                        buildStopExitSignal(symbol, klines, bar, activePosition, open, "GAP_STOP")
+                );
+            }
+            if (open.compareTo(activePosition.targetPrice()) >= 0) {
+                return RuntimeManagementEvent.close(
+                        buildTargetExitSignal(symbol, klines, bar, activePosition, open, "GAP_TARGET")
+                );
+            }
+
+            activePosition.activatePendingAddOn(open);
+
+            boolean hitStop = low.compareTo(activePosition.stopPrice()) <= 0;
+            boolean hitTarget = high.compareTo(activePosition.targetPrice()) >= 0;
+            if (hitStop && hitTarget) {
+                return RuntimeManagementEvent.close(
+                        buildStopExitSignal(symbol, klines, bar, activePosition, activePosition.stopPrice(), "BOTH_HIT_STOP_PRIORITY")
+                );
+            }
+            if (hitStop) {
+                return RuntimeManagementEvent.close(
+                        buildStopExitSignal(symbol, klines, bar, activePosition, activePosition.stopPrice(), "STOP")
+                );
+            }
+            if (activePosition.canScaleOut() && high.compareTo(activePosition.scaleOutPrice()) >= 0) {
+                activePosition.applyScaleOut();
+                scaleOutTriggered = true;
+            }
+            if (hitTarget) {
+                return RuntimeManagementEvent.close(
+                        buildTargetExitSignal(symbol, klines, bar, activePosition, activePosition.targetPrice(), "TARGET")
+                );
+            }
+            return scaleOutTriggered ? RuntimeManagementEvent.scaleOutPending() : RuntimeManagementEvent.none();
+        }
+
+        if (open.compareTo(activePosition.stopPrice()) >= 0) {
+            return RuntimeManagementEvent.close(
+                    buildStopExitSignal(symbol, klines, bar, activePosition, open, "GAP_STOP")
+            );
+        }
+        if (open.compareTo(activePosition.targetPrice()) <= 0) {
+            return RuntimeManagementEvent.close(
+                    buildTargetExitSignal(symbol, klines, bar, activePosition, open, "GAP_TARGET")
+            );
+        }
+
+        activePosition.activatePendingAddOn(open);
+
+        boolean hitStop = high.compareTo(activePosition.stopPrice()) >= 0;
+        boolean hitTarget = low.compareTo(activePosition.targetPrice()) <= 0;
+        if (hitStop && hitTarget) {
+            return RuntimeManagementEvent.close(
+                    buildStopExitSignal(symbol, klines, bar, activePosition, activePosition.stopPrice(), "BOTH_HIT_STOP_PRIORITY")
+            );
+        }
+        if (hitStop) {
+            return RuntimeManagementEvent.close(
+                    buildStopExitSignal(symbol, klines, bar, activePosition, activePosition.stopPrice(), "STOP")
+            );
+        }
+        if (activePosition.canScaleOut() && low.compareTo(activePosition.scaleOutPrice()) <= 0) {
+            activePosition.applyScaleOut();
+            scaleOutTriggered = true;
+        }
+        if (hitTarget) {
+            return RuntimeManagementEvent.close(
+                    buildTargetExitSignal(symbol, klines, bar, activePosition, activePosition.targetPrice(), "TARGET")
+            );
+        }
+        return scaleOutTriggered ? RuntimeManagementEvent.scaleOutPending() : RuntimeManagementEvent.none();
+    }
+
+    private AlertSignal buildManagedFailedFollowThroughExitSignal(String symbol,
+                                                                  List<BinanceKlineDTO> klines,
+                                                                  BinanceKlineDTO latest,
+                                                                  RuntimePosition activePosition,
+                                                                  int barsSinceEntry) {
+        String directionLabel = activePosition.direction() == TradeDirection.LONG ? "多头" : "空头";
+        String summary = String.format(
+                "前序 %s 在进场后第 %d 根 K 线出现 failed follow-through，当前应优先结束 %s 计划。",
+                activePosition.signalType(),
+                barsSinceEntry,
+                directionLabel
+        );
+        return buildRuntimeManagementSignal(
+                symbol,
+                klines,
+                latest,
+                activePosition,
+                "EXIT_FAILED_FOLLOW_THROUGH_" + activePosition.direction().name(),
+                symbol + " failed follow-through 提前离场",
+                summary,
+                StrategySupport.valueOf(latest.getClose()),
+                "FAILED_FOLLOW_THROUGH"
+        );
+    }
+
+    private AlertSignal buildScaleOutSignal(String symbol,
+                                            List<BinanceKlineDTO> klines,
+                                            BinanceKlineDTO bar,
+                                            RuntimePosition activePosition) {
+        String summary = String.format(
+                "前序 %s 已触及首个减仓位，建议先兑现 %s 仓位，并把剩余仓位按新的防守位继续管理。",
+                activePosition.signalType(),
+                formatFraction(activePosition.scaleOutFraction())
+        );
+        return buildRuntimeManagementSignal(
+                symbol,
+                klines,
+                bar,
+                activePosition,
+                "EXIT_SCALE_OUT_" + activePosition.direction().name(),
+                symbol + " 触发首个减仓位",
+                summary,
+                activePosition.scaleOutPrice(),
+                "SCALE_OUT"
+        );
+    }
+
+    private AlertSignal buildTargetExitSignal(String symbol,
+                                              List<BinanceKlineDTO> klines,
+                                              BinanceKlineDTO bar,
+                                              RuntimePosition activePosition,
+                                              BigDecimal exitPrice,
+                                              String reasonTag) {
+        String summary = String.format(
+                "前序 %s 已触达计划目标，当前应优先完成止盈%s。",
+                activePosition.signalType(),
+                "GAP_TARGET".equals(reasonTag) ? "（开盘直接越过目标）" : ""
+        );
+        return buildRuntimeManagementSignal(
+                symbol,
+                klines,
+                bar,
+                activePosition,
+                "EXIT_TARGET_" + activePosition.direction().name(),
+                symbol + " 命中目标止盈",
+                summary,
+                exitPrice,
+                reasonTag
+        );
+    }
+
+    private AlertSignal buildStopExitSignal(String symbol,
+                                            List<BinanceKlineDTO> klines,
+                                            BinanceKlineDTO bar,
+                                            RuntimePosition activePosition,
+                                            BigDecimal exitPrice,
+                                            String reasonTag) {
+        boolean trailingStop = activePosition.isTrailingStopActive();
+        String summary = trailingStop
+                ? String.format("前序 %s 已回吐至 trailing stop，当前应按计划结束剩余仓位。", activePosition.signalType())
+                : String.format("前序 %s 已触发止损/保护位，当前应无条件离场。", activePosition.signalType());
+        return buildRuntimeManagementSignal(
+                symbol,
+                klines,
+                bar,
+                activePosition,
+                (trailingStop ? "EXIT_TRAILING_STOP_" : "EXIT_STOP_") + activePosition.direction().name(),
+                trailingStop ? symbol + " 触发 trailing stop" : symbol + " 触发止损离场",
+                summary,
+                exitPrice,
+                reasonTag
+        );
+    }
+
+    private AlertSignal buildRuntimeManagementSignal(String symbol,
+                                                     List<BinanceKlineDTO> klines,
+                                                     BinanceKlineDTO bar,
+                                                     RuntimePosition activePosition,
+                                                     String type,
+                                                     String title,
+                                                     String summary,
+                                                     BigDecimal referencePrice,
+                                                     String reasonTag) {
+        return new AlertSignal(
+                activePosition.direction(),
+                title,
+                bar,
+                type,
+                summary,
+                scalePrice(referencePrice),
+                scalePrice(activePosition.stopPrice()),
+                scalePrice(activePosition.targetPrice()),
+                buildVolumeRatio(klines, bar),
+                null,
+                buildPositionContext(activePosition, reasonTag),
+                scalePrice(activePosition.entryPrice()),
+                scalePrice(activePosition.initialStopPrice())
+        );
+    }
+
+    private BigDecimal buildVolumeRatio(List<BinanceKlineDTO> klines, BinanceKlineDTO referenceBar) {
+        List<BinanceKlineDTO> closedKlines = StrategySupport.closedKlines(klines);
+        if (closedKlines.isEmpty()) {
+            return null;
+        }
+
+        List<BinanceKlineDTO> baseline;
+        int referenceIndex = closedKlines.indexOf(referenceBar);
+        if (referenceIndex > 0) {
+            int start = Math.max(0, referenceIndex - 10);
+            baseline = closedKlines.subList(start, referenceIndex);
+        } else {
+            int start = Math.max(0, closedKlines.size() - Math.min(10, closedKlines.size()));
+            baseline = closedKlines.subList(start, closedKlines.size());
+        }
+        if (baseline.isEmpty()) {
+            return null;
+        }
+        return StrategySupport.scaleOrNull(
+                StrategySupport.ratio(StrategySupport.volumeOf(referenceBar), StrategySupport.averageVolume(baseline))
+        );
+    }
+
+    private String buildPositionContext(RuntimePosition activePosition, String reasonTag) {
+        return "entryType=" + activePosition.signalType()
+                + " | entryPrice=" + StrategySupport.scaleOrNull(activePosition.entryPrice())
+                + " | initialStop=" + StrategySupport.scaleOrNull(activePosition.initialStopPrice())
+                + " | activeStop=" + StrategySupport.scaleOrNull(activePosition.stopPrice())
+                + " | remainingSize=" + StrategySupport.scaleOrNull(activePosition.remainingSize())
+                + " | scaleOut=" + activePosition.scaleOutTaken()
+                + " | addOns=" + activePosition.addOnsUsed()
+                + " | pendingAddOn=" + activePosition.pendingAddOn()
+                + " | reason=" + reasonTag;
+    }
+
+    private BigDecimal scalePrice(BigDecimal value) {
+        return value == null ? null : value.setScale(2, java.math.RoundingMode.HALF_UP);
+    }
+
+    private String formatFraction(BigDecimal value) {
+        if (value == null) {
+            return "-";
+        }
+        return value.multiply(new BigDecimal("100")).setScale(0, java.math.RoundingMode.HALF_UP) + "%";
+    }
+
+    private void sendRuntimeManagementSignal(String symbol, RuntimePosition activePosition, AlertSignal signal) {
+        if (signal == null) {
+            return;
+        }
+        alertNotificationService.send(signal);
+        log.info("Runtime management alert sent, symbol={}, originalSignalType={}, alertType={}, stop={}, target={}, remainingSize={}",
+                symbol,
+                activePosition.signalType(),
+                signal.getType(),
+                activePosition.stopPrice(),
+                activePosition.targetPrice(),
+                activePosition.remainingSize());
+    }
+
+    private void rememberManagedRuntimePosition(AlertSignal signal) {
+        if (signal == null || signal.getKline() == null || signal.getKline().getSymbol() == null || !tracksRuntimePosition(signal)) {
+            return;
+        }
+        activePositions.put(signal.getKline().getSymbol(), new RuntimePosition(
+                signal.getType(),
+                signal.getDirection(),
+                signal.getKline().getEndTime(),
+                signal.getTriggerPrice(),
+                signal.getInvalidationPrice(),
+                signal.getTargetPrice(),
+                scaleOutTriggerR,
+                scaleOutFraction,
+                trailingActivationR,
+                trailingDistanceR,
+                pyramidMaxAdds,
+                pyramidTriggerR,
+                pyramidAddFraction
+        ));
+    }
+
+    private boolean tracksRuntimePosition(AlertSignal signal) {
+        return StringUtils.hasText(signal.getType())
+                && (signal.getType().startsWith("CONFIRMED_BREAKOUT")
+                || signal.getType().startsWith("BREAKOUT_PULLBACK")
+                || signal.getType().startsWith("SECOND_ENTRY"));
+    }
+
+    private record RuntimeManagementEvent(AlertSignal signal, boolean closePosition, boolean scaleOutTriggered) {
+        private static RuntimeManagementEvent none() {
+            return new RuntimeManagementEvent(null, false, false);
+        }
+
+        private static RuntimeManagementEvent alert(AlertSignal signal) {
+            return new RuntimeManagementEvent(signal, false, false);
+        }
+
+        private static RuntimeManagementEvent close(AlertSignal signal) {
+            return new RuntimeManagementEvent(signal, true, false);
+        }
+
+        private static RuntimeManagementEvent scaleOutPending() {
+            return new RuntimeManagementEvent(null, false, true);
+        }
+    }
+
+    private void rememberRuntimePosition(AlertSignal signal) {
+        if (signal == null || signal.getKline() == null || signal.getKline().getSymbol() == null || !tracksFailedFollowThrough(signal)) {
+            return;
+        }
+        activePositions.put(signal.getKline().getSymbol(), new RuntimePosition(
+                signal.getType(),
+                signal.getDirection(),
+                signal.getKline().getEndTime(),
+                signal.getTriggerPrice(),
+                signal.getInvalidationPrice(),
+                signal.getTargetPrice()
+        ));
+    }
+
+    private boolean tracksFailedFollowThrough(AlertSignal signal) {
+        return StringUtils.hasText(signal.getType())
+                && (signal.getType().startsWith("CONFIRMED_BREAKOUT")
+                || signal.getType().startsWith("BREAKOUT_PULLBACK")
+                || signal.getType().startsWith("SECOND_ENTRY"));
+    }
+
+    private boolean supportsSecondEntry(FeatureSnapshot featureSnapshot) {
+        if (featureSnapshot == null || featureSnapshot.getMarketState() == null) {
+            return true;
+        }
+        return switch (featureSnapshot.getMarketState()) {
+            case UNKNOWN, BREAKOUT, PULLBACK, TREND -> true;
+            case RANGE -> false;
+        };
     }
 }

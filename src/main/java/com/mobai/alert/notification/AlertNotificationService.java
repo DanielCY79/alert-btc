@@ -58,7 +58,9 @@ public class AlertNotificationService {
 
     public void send(AlertSignal signal) {
         String recordKey = signal.getKline().getSymbol() + signal.getType();
-        NotificationMessage message = buildSignalMessage(signal);
+        NotificationMessage message = isExit(signal)
+                ? buildRuntimeExitSignalMessage(signal)
+                : buildSignalMessage(signal);
         send(recordKey, message, "策略信号", signal.getKline().getSymbol(), signal.getType());
     }
 
@@ -187,6 +189,130 @@ public class AlertNotificationService {
         return new NotificationMessage(markdownContent, plainTextContent);
     }
 
+    private NotificationMessage buildExitSignalMessage(AlertSignal signal) {
+        BinanceKlineDTO kline = signal.getKline();
+        BigDecimal closePrice = decimal(kline.getClose(), 2);
+        BigDecimal amplitude = calculateAmplitude(kline).multiply(ONE_HUNDRED).setScale(2, RoundingMode.HALF_UP);
+        BigDecimal volume = convertToWan(decimal(kline.getVolume(), 0));
+        LocalDateTime now = LocalDateTime.now();
+        LocalDateTime klineTime = LocalDateTime.ofInstant(Instant.ofEpochMilli(kline.getEndTime()), ZoneId.systemDefault());
+        String interval = StringUtils.hasText(kline.getInterval()) ? kline.getInterval() : "15m";
+        String symbol = kline.getSymbol();
+        String chartUrl = buildChartUrl(symbol, interval);
+        BigDecimal stopDistance = stopDistancePct(signal);
+        BigDecimal moveFromEntry = realizedMoveR(signal, closePrice);
+
+        String markdownContent = new StringBuilder()
+                .append(symbol).append(" 退出提醒\n")
+                .append("> 信号: ").append(defaultText(signal.getTitle(), signal.getType())).append("\n")
+                .append("> 动作: 若已按前序信号进场，当前应优先离场或显著收紧风险\n")
+                .append("> 退出原因: failed follow-through，顺势接受度不足\n")
+                .append("> 当前价: ").append(closePrice).append(" USDT\n")
+                .append("> 参考离场价: ").append(formatNullablePrice(signal.getTriggerPrice())).append("\n")
+                .append("> 原始止损: ").append(formatNullablePrice(signal.getInvalidationPrice())).append("\n")
+                .append("> 原始目标: ").append(formatNullablePrice(signal.getTargetPrice())).append("\n")
+                .append("> 当前浮动R: ").append(formatNullableMultiple(moveFromEntry)).append("\n")
+                .append("> 止损宽度: ").append(formatNullablePercent(stopDistance)).append("\n")
+                .append("> 放量倍数: ").append(formatNullableRatio(signal.getVolumeRatio())).append("\n")
+                .append("> 退出说明: ").append(defaultText(signal.getSummary(), "-")).append("\n")
+                .append("> 上下文: ").append(defaultText(signal.getContextComment(), "-")).append("\n")
+                .append("> 周期: ").append(interval).append("\n")
+                .append("> 振幅: ").append(amplitude).append("%\n")
+                .append("> 成交额: ").append(volume).append(" 万USDT\n")
+                .append("> 发送时间: ").append(MESSAGE_TIME_FORMATTER.format(now)).append("\n")
+                .append("> K线收盘: ").append(MESSAGE_TIME_FORMATTER.format(klineTime)).append("\n")
+                .append("[打开图表](").append(chartUrl).append(")")
+                .toString();
+
+        String plainTextContent = new StringBuilder()
+                .append(symbol).append(" 退出提醒\n")
+                .append("信号: ").append(defaultText(signal.getTitle(), signal.getType())).append("\n")
+                .append("动作: 若已按前序信号进场，当前应优先离场或显著收紧风险\n")
+                .append("退出原因: failed follow-through，顺势接受度不足\n")
+                .append("当前价: ").append(closePrice).append(" USDT\n")
+                .append("参考离场价: ").append(formatNullablePrice(signal.getTriggerPrice())).append("\n")
+                .append("原始止损: ").append(formatNullablePrice(signal.getInvalidationPrice())).append("\n")
+                .append("原始目标: ").append(formatNullablePrice(signal.getTargetPrice())).append("\n")
+                .append("当前浮动R: ").append(formatNullableMultiple(moveFromEntry)).append("\n")
+                .append("止损宽度: ").append(formatNullablePercent(stopDistance)).append("\n")
+                .append("放量倍数: ").append(formatNullableRatio(signal.getVolumeRatio())).append("\n")
+                .append("退出说明: ").append(defaultText(signal.getSummary(), "-")).append("\n")
+                .append("上下文: ").append(defaultText(signal.getContextComment(), "-")).append("\n")
+                .append("周期: ").append(interval).append("\n")
+                .append("振幅: ").append(amplitude).append("%\n")
+                .append("成交额: ").append(volume).append(" 万USDT\n")
+                .append("发送时间: ").append(MESSAGE_TIME_FORMATTER.format(now)).append("\n")
+                .append("K线收盘: ").append(MESSAGE_TIME_FORMATTER.format(klineTime)).append("\n")
+                .append("图表: ").append(chartUrl)
+                .toString();
+
+        return new NotificationMessage(markdownContent, plainTextContent);
+    }
+
+    private NotificationMessage buildRuntimeExitSignalMessage(AlertSignal signal) {
+        BinanceKlineDTO kline = signal.getKline();
+        BigDecimal closePrice = decimal(kline.getClose(), 2);
+        BigDecimal amplitude = calculateAmplitude(kline).multiply(ONE_HUNDRED).setScale(2, RoundingMode.HALF_UP);
+        BigDecimal volume = convertToWan(decimal(kline.getVolume(), 0));
+        LocalDateTime now = LocalDateTime.now();
+        LocalDateTime klineTime = LocalDateTime.ofInstant(Instant.ofEpochMilli(kline.getEndTime()), ZoneId.systemDefault());
+        String interval = StringUtils.hasText(kline.getInterval()) ? kline.getInterval() : "15m";
+        String symbol = kline.getSymbol();
+        String chartUrl = buildChartUrl(symbol, interval);
+        BigDecimal stopDistance = baselineStopDistancePct(signal);
+        BigDecimal moveFromEntry = realizedExitMoveR(signal, closePrice);
+        String actionText = exitAction(signal);
+        String reasonText = exitReason(signal);
+
+        String markdownContent = new StringBuilder()
+                .append(symbol).append(" 退出提醒\n")
+                .append("> 信号: ").append(defaultText(signal.getTitle(), signal.getType())).append("\n")
+                .append("> 动作: ").append(actionText).append("\n")
+                .append("> 退出原因: ").append(reasonText).append("\n")
+                .append("> 当前价: ").append(closePrice).append(" USDT\n")
+                .append("> 参考离场价: ").append(formatNullablePrice(signal.getTriggerPrice())).append("\n")
+                .append("> 入场基准: ").append(formatNullablePrice(signal.getReferenceEntryPrice())).append("\n")
+                .append("> 当前防守位: ").append(formatNullablePrice(signal.getInvalidationPrice())).append("\n")
+                .append("> 原计划目标: ").append(formatNullablePrice(signal.getTargetPrice())).append("\n")
+                .append("> 当前浮动R: ").append(formatNullableMultiple(moveFromEntry)).append("\n")
+                .append("> 基准止损宽度: ").append(formatNullablePercent(stopDistance)).append("\n")
+                .append("> 放量倍数: ").append(formatNullableRatio(signal.getVolumeRatio())).append("\n")
+                .append("> 退出说明: ").append(defaultText(signal.getSummary(), "-")).append("\n")
+                .append("> 上下文: ").append(defaultText(signal.getContextComment(), "-")).append("\n")
+                .append("> 周期: ").append(interval).append("\n")
+                .append("> 振幅: ").append(amplitude).append("%\n")
+                .append("> 成交额: ").append(volume).append(" 万USDT\n")
+                .append("> 发送时间: ").append(MESSAGE_TIME_FORMATTER.format(now)).append("\n")
+                .append("> 参考K线: ").append(MESSAGE_TIME_FORMATTER.format(klineTime)).append("\n")
+                .append("[打开图表](").append(chartUrl).append(")")
+                .toString();
+
+        String plainTextContent = new StringBuilder()
+                .append(symbol).append(" 退出提醒\n")
+                .append("信号: ").append(defaultText(signal.getTitle(), signal.getType())).append("\n")
+                .append("动作: ").append(actionText).append("\n")
+                .append("退出原因: ").append(reasonText).append("\n")
+                .append("当前价: ").append(closePrice).append(" USDT\n")
+                .append("参考离场价: ").append(formatNullablePrice(signal.getTriggerPrice())).append("\n")
+                .append("入场基准: ").append(formatNullablePrice(signal.getReferenceEntryPrice())).append("\n")
+                .append("当前防守位: ").append(formatNullablePrice(signal.getInvalidationPrice())).append("\n")
+                .append("原计划目标: ").append(formatNullablePrice(signal.getTargetPrice())).append("\n")
+                .append("当前浮动R: ").append(formatNullableMultiple(moveFromEntry)).append("\n")
+                .append("基准止损宽度: ").append(formatNullablePercent(stopDistance)).append("\n")
+                .append("放量倍数: ").append(formatNullableRatio(signal.getVolumeRatio())).append("\n")
+                .append("退出说明: ").append(defaultText(signal.getSummary(), "-")).append("\n")
+                .append("上下文: ").append(defaultText(signal.getContextComment(), "-")).append("\n")
+                .append("周期: ").append(interval).append("\n")
+                .append("振幅: ").append(amplitude).append("%\n")
+                .append("成交额: ").append(volume).append(" 万USDT\n")
+                .append("发送时间: ").append(MESSAGE_TIME_FORMATTER.format(now)).append("\n")
+                .append("参考K线: ").append(MESSAGE_TIME_FORMATTER.format(klineTime)).append("\n")
+                .append("图表: ").append(chartUrl)
+                .toString();
+
+        return new NotificationMessage(markdownContent, plainTextContent);
+    }
+
     private NotificationMessage buildAnnouncementMessage(BinanceAnnouncementDTO announcement) {
         LocalDateTime publishTime = announcement.getPublishDate() == null
                 ? LocalDateTime.now()
@@ -291,6 +417,9 @@ public class AlertNotificationService {
             return "趋势确认突破";
         }
         if (isPullback(signal)) {
+            if (signal.getType().startsWith("SECOND_ENTRY")) {
+                return "H1/H2 二次入场";
+            }
             return "突破后回踩延续";
         }
         if (isRangeFailure(signal)) {
@@ -601,15 +730,113 @@ public class AlertNotificationService {
         return reward.divide(risk, 4, RoundingMode.HALF_UP);
     }
 
+    private BigDecimal realizedMoveR(AlertSignal signal, BigDecimal currentPrice) {
+        if (signal == null || signal.getTriggerPrice() == null || signal.getInvalidationPrice() == null || currentPrice == null) {
+            return null;
+        }
+        BigDecimal risk = signal.getTriggerPrice().subtract(signal.getInvalidationPrice()).abs();
+        if (risk.compareTo(ZERO) == 0) {
+            return null;
+        }
+        BigDecimal move = signal.getDirection() == TradeDirection.LONG
+                ? currentPrice.subtract(signal.getTriggerPrice())
+                : signal.getTriggerPrice().subtract(currentPrice);
+        return move.divide(risk, 4, RoundingMode.HALF_UP);
+    }
+
+    private BigDecimal baselineStopDistancePct(AlertSignal signal) {
+        BigDecimal entryPrice = signal == null ? null : signal.getReferenceEntryPrice();
+        BigDecimal stopPrice = signal == null ? null : signal.getReferenceStopPrice();
+        if (entryPrice == null || stopPrice == null || entryPrice.compareTo(ZERO) == 0) {
+            return stopDistancePct(signal);
+        }
+        return entryPrice.subtract(stopPrice)
+                .abs()
+                .divide(entryPrice, 6, RoundingMode.HALF_UP)
+                .multiply(ONE_HUNDRED);
+    }
+
+    private BigDecimal realizedExitMoveR(AlertSignal signal, BigDecimal currentPrice) {
+        if (signal == null || currentPrice == null) {
+            return null;
+        }
+
+        BigDecimal entryPrice = signal.getReferenceEntryPrice() != null ? signal.getReferenceEntryPrice() : signal.getTriggerPrice();
+        BigDecimal stopPrice = signal.getReferenceStopPrice() != null ? signal.getReferenceStopPrice() : signal.getInvalidationPrice();
+        if (entryPrice == null || stopPrice == null) {
+            return null;
+        }
+
+        BigDecimal risk = entryPrice.subtract(stopPrice).abs();
+        if (risk.compareTo(ZERO) == 0) {
+            return null;
+        }
+
+        BigDecimal move = signal.getDirection() == TradeDirection.LONG
+                ? currentPrice.subtract(entryPrice)
+                : entryPrice.subtract(currentPrice);
+        return move.divide(risk, 4, RoundingMode.HALF_UP);
+    }
+
+    private String exitAction(AlertSignal signal) {
+        if (signal == null || !StringUtils.hasText(signal.getType())) {
+            return "若已按前序信号进场，当前应优先执行离场计划。";
+        }
+        if (signal.getType().startsWith("EXIT_SCALE_OUT")) {
+            return "若已按前序信号进场，当前应先兑现部分利润，并把剩余仓位按新的防守位继续管理。";
+        }
+        if (signal.getType().startsWith("EXIT_TARGET")) {
+            return "若已按前序信号进场，计划目标已命中，当前应优先完成止盈。";
+        }
+        if (signal.getType().startsWith("EXIT_TRAILING_STOP")) {
+            return "若已按前序信号进场，保护性 trailing stop 已触发，当前应按计划结束剩余仓位。";
+        }
+        if (signal.getType().startsWith("EXIT_STOP")) {
+            return "若仍在场，失效/保护止损已触发，当前应无条件离场。";
+        }
+        if (signal.getType().startsWith("EXIT_FAILED_FOLLOW_THROUGH")) {
+            return "若已按前序信号进场，当前应优先离场或显著收紧风险。";
+        }
+        return "若已按前序信号进场，当前应优先执行离场计划。";
+    }
+
+    private String exitReason(AlertSignal signal) {
+        if (signal == null || !StringUtils.hasText(signal.getType())) {
+            return "-";
+        }
+        if (signal.getType().startsWith("EXIT_SCALE_OUT")) {
+            return "价格到达首个 1R 减仓位，按计划先兑现部分利润。";
+        }
+        if (signal.getType().startsWith("EXIT_TARGET")) {
+            return "价格已经到达预设止盈目标。";
+        }
+        if (signal.getType().startsWith("EXIT_TRAILING_STOP")) {
+            return "价格回吐至已经抬升的 trailing stop。";
+        }
+        if (signal.getType().startsWith("EXIT_STOP")) {
+            return "价格已经触发初始或保护性止损。";
+        }
+        if (signal.getType().startsWith("EXIT_FAILED_FOLLOW_THROUGH")) {
+            return "突破后的接受度不足，属于 failed follow-through 早退。";
+        }
+        return signal.getType();
+    }
+
     private boolean isBreakout(AlertSignal signal) {
         return signal != null && StringUtils.hasText(signal.getType()) && signal.getType().startsWith("CONFIRMED_BREAKOUT");
     }
 
     private boolean isPullback(AlertSignal signal) {
-        return signal != null && StringUtils.hasText(signal.getType()) && signal.getType().startsWith("BREAKOUT_PULLBACK");
+        return signal != null
+                && StringUtils.hasText(signal.getType())
+                && (signal.getType().startsWith("BREAKOUT_PULLBACK") || signal.getType().startsWith("SECOND_ENTRY"));
     }
 
     private boolean isRangeFailure(AlertSignal signal) {
         return signal != null && StringUtils.hasText(signal.getType()) && signal.getType().startsWith("RANGE_FAILURE");
+    }
+
+    private boolean isExit(AlertSignal signal) {
+        return signal != null && StringUtils.hasText(signal.getType()) && signal.getType().startsWith("EXIT_");
     }
 }

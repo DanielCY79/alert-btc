@@ -4,6 +4,7 @@ import com.mobai.alert.access.kline.dto.BinanceKlineDTO;
 import com.mobai.alert.feature.model.CompositeFactors;
 import com.mobai.alert.feature.model.FeatureQuality;
 import com.mobai.alert.feature.model.FeatureSnapshot;
+import com.mobai.alert.state.runtime.MarketState;
 import com.mobai.alert.state.signal.AlertSignal;
 import com.mobai.alert.state.signal.TradeDirection;
 import org.junit.jupiter.api.Test;
@@ -29,7 +30,8 @@ class CompositeFactorSignalPolicyTests {
                 new BigDecimal("0.25"),
                 new BigDecimal("0.20"),
                 true,
-                1
+                1,
+                MarketState.BREAKOUT
         );
 
         SignalPolicyDecision decision = policy.evaluate(signal, snapshot);
@@ -39,6 +41,7 @@ class CompositeFactorSignalPolicyTests {
         assertNotNull(decision.score());
         assertTrue(decision.score().compareTo(new BigDecimal("0.55")) >= 0);
         assertTrue(decision.signal().getContextComment().contains("综合环境分"));
+        assertTrue(decision.signal().getContextComment().contains("市场状态=突破"));
         assertTrue(decision.signal().getContextComment().contains("趋势偏置=0.70"));
         assertTrue(decision.signal().getContextComment().contains("突破确认=0.65"));
         assertEquals(decision.score(), decision.signal().getContextScore());
@@ -55,7 +58,8 @@ class CompositeFactorSignalPolicyTests {
                 new BigDecimal("-0.20"),
                 new BigDecimal("0.20"),
                 true,
-                0
+                0,
+                MarketState.BREAKOUT
         );
 
         SignalPolicyDecision decision = policy.evaluate(signal, snapshot);
@@ -79,7 +83,8 @@ class CompositeFactorSignalPolicyTests {
                 BigDecimal.ZERO,
                 BigDecimal.ZERO,
                 true,
-                0
+                0,
+                MarketState.BREAKOUT
         );
         FeatureSnapshot derivativeMissingSnapshot = snapshot(
                 new BigDecimal("0.20"),
@@ -88,7 +93,8 @@ class CompositeFactorSignalPolicyTests {
                 BigDecimal.ZERO,
                 BigDecimal.ZERO,
                 false,
-                0
+                0,
+                MarketState.BREAKOUT
         );
 
         SignalPolicyDecision readyDecision = policy.evaluate(signal, derivativeReadySnapshot);
@@ -99,6 +105,29 @@ class CompositeFactorSignalPolicyTests {
         assertTrue(missingDecision.reasons().contains("衍生品快照缺失"));
         assertTrue(missingDecision.reasons().contains("拦截：环境分低于阈值"));
         assertTrue(readyDecision.score().compareTo(missingDecision.score()) > 0);
+    }
+
+    @Test
+    void shouldBlockRangeFailureOutsideRangeState() {
+        CompositeFactorSignalPolicy policy = createPolicy();
+        AlertSignal signal = rangeFailureLongSignal();
+        FeatureSnapshot snapshot = snapshot(
+                new BigDecimal("0.45"),
+                new BigDecimal("0.20"),
+                BigDecimal.ZERO,
+                BigDecimal.ZERO,
+                new BigDecimal("0.10"),
+                true,
+                0,
+                MarketState.TREND
+        );
+
+        SignalPolicyDecision decision = policy.evaluate(signal, snapshot);
+
+        assertFalse(decision.allowed());
+        assertTrue(decision.reasons().contains("市场状态=趋势"));
+        assertTrue(decision.reasons().contains("拦截：当前市场状态=趋势，不接受区间失败反转"));
+        assertTrue(decision.signal().getContextComment().contains("市场状态=趋势"));
     }
 
     private CompositeFactorSignalPolicy createPolicy() {
@@ -116,19 +145,16 @@ class CompositeFactorSignalPolicyTests {
         ReflectionTestUtils.setField(policy, "negativeEventVeto", new BigDecimal("-0.60"));
         ReflectionTestUtils.setField(policy, "eventRiskGate", new BigDecimal("0.45"));
         ReflectionTestUtils.setField(policy, "crowdedBreakoutRiskGate", new BigDecimal("0.70"));
-
         ReflectionTestUtils.setField(policy, "rangeFailureTrendWeight", new BigDecimal("0.18"));
         ReflectionTestUtils.setField(policy, "rangeFailureBreakoutWeight", new BigDecimal("0.10"));
         ReflectionTestUtils.setField(policy, "rangeFailureEventWeight", new BigDecimal("0.12"));
         ReflectionTestUtils.setField(policy, "rangeFailureCrowdingWeight", new BigDecimal("0.12"));
         ReflectionTestUtils.setField(policy, "rangeFailureRegimeRiskWeight", new BigDecimal("0.18"));
-
         ReflectionTestUtils.setField(policy, "breakoutTrendWeight", new BigDecimal("0.18"));
         ReflectionTestUtils.setField(policy, "breakoutBreakoutWeight", new BigDecimal("0.26"));
         ReflectionTestUtils.setField(policy, "breakoutEventWeight", new BigDecimal("0.10"));
         ReflectionTestUtils.setField(policy, "breakoutCrowdingWeight", new BigDecimal("0.08"));
         ReflectionTestUtils.setField(policy, "breakoutRegimeRiskWeight", new BigDecimal("0.22"));
-
         ReflectionTestUtils.setField(policy, "pullbackTrendWeight", new BigDecimal("0.24"));
         ReflectionTestUtils.setField(policy, "pullbackBreakoutWeight", new BigDecimal("0.18"));
         ReflectionTestUtils.setField(policy, "pullbackEventWeight", new BigDecimal("0.10"));
@@ -138,6 +164,36 @@ class CompositeFactorSignalPolicyTests {
     }
 
     private AlertSignal breakoutLongSignal() {
+        BinanceKlineDTO kline = baseKline();
+        return new AlertSignal(
+                TradeDirection.LONG,
+                "BTC 确认突破做多信号",
+                kline,
+                "CONFIRMED_BREAKOUT_LONG",
+                "价格向上有效突破区间，属于确认型突破。",
+                new BigDecimal("109.00"),
+                new BigDecimal("104.00"),
+                new BigDecimal("118.00"),
+                new BigDecimal("1.80")
+        );
+    }
+
+    private AlertSignal rangeFailureLongSignal() {
+        BinanceKlineDTO kline = baseKline();
+        return new AlertSignal(
+                TradeDirection.LONG,
+                "BTC 区间假跌破做多信号",
+                kline,
+                "RANGE_FAILURE_LONG",
+                "价格跌破后重新收回区间，属于区间失败反转。",
+                new BigDecimal("101.00"),
+                new BigDecimal("98.00"),
+                new BigDecimal("106.00"),
+                new BigDecimal("1.10")
+        );
+    }
+
+    private BinanceKlineDTO baseKline() {
         BinanceKlineDTO kline = new BinanceKlineDTO();
         kline.setSymbol("BTCUSDT");
         kline.setInterval("4h");
@@ -147,18 +203,7 @@ class CompositeFactorSignalPolicyTests {
         kline.setClose("108.00");
         kline.setVolume("100000");
         kline.setEndTime(System.currentTimeMillis());
-
-        return new AlertSignal(
-                TradeDirection.LONG,
-                "BTC 确认突破做多信号",
-                kline,
-                "CONFIRMED_BREAKOUT_LONG",
-                "价格向上有效突破区间，成交量放大至 1.80x，属于确认型突破。",
-                new BigDecimal("109.00"),
-                new BigDecimal("104.00"),
-                new BigDecimal("118.00"),
-                new BigDecimal("1.80")
-        );
+        return kline;
     }
 
     private FeatureSnapshot snapshot(BigDecimal trendBias,
@@ -167,7 +212,8 @@ class CompositeFactorSignalPolicyTests {
                                      BigDecimal eventBias,
                                      BigDecimal regimeRisk,
                                      boolean derivativeReady,
-                                     int relevantEventCount) {
+                                     int relevantEventCount,
+                                     MarketState marketState) {
         CompositeFactors factors = new CompositeFactors();
         factors.setTrendBiasScore(trendBias);
         factors.setBreakoutConfirmationScore(breakoutConfirmation);
@@ -189,6 +235,8 @@ class CompositeFactorSignalPolicyTests {
         snapshot.setGeneratedAt(System.currentTimeMillis());
         snapshot.setCompositeFactors(factors);
         snapshot.setQuality(quality);
+        snapshot.setMarketState(marketState);
+        snapshot.setMarketStateComment("测试状态");
         return snapshot;
     }
 }

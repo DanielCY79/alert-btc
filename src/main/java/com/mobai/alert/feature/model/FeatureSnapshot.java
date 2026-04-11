@@ -1,5 +1,7 @@
 package com.mobai.alert.feature.model;
 
+import com.mobai.alert.state.runtime.MarketState;
+
 /**
  * 统一特征快照对象。
  * 聚合价格、衍生品、事件、复合因子以及质量信息。
@@ -41,6 +43,8 @@ public class FeatureSnapshot {
      * 快照质量信息。
      */
     private FeatureQuality quality;
+    private MarketState marketState;
+    private String marketStateComment;
 
     public String getSymbol() {
         return symbol;
@@ -112,5 +116,21 @@ public class FeatureSnapshot {
 
     public void setQuality(FeatureQuality quality) {
         this.quality = quality;
+    }
+
+    public MarketState getMarketState() {
+        return marketState;
+    }
+
+    public void setMarketState(MarketState marketState) {
+        this.marketState = marketState;
+    }
+
+    public String getMarketStateComment() {
+        return marketStateComment;
+    }
+
+    public void setMarketStateComment(String marketStateComment) {
+        this.marketStateComment = marketStateComment;
     }
 }

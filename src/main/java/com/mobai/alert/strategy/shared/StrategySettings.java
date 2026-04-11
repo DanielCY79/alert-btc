@@ -36,7 +36,16 @@ public record StrategySettings(int fastPeriod,
                                BigDecimal failureMinWickBodyRatio,
                                BigDecimal pullbackTouchTolerance,
                                BigDecimal pullbackHoldBuffer,
-                               BigDecimal pullbackMaxVolumeRatio) {
+                               BigDecimal pullbackMaxVolumeRatio,
+                               BigDecimal breakoutFollowThroughCloseBuffer,
+                               BigDecimal breakoutFollowThroughMinBodyRatio,
+                               BigDecimal breakoutFollowThroughMinCloseLocation,
+                               BigDecimal breakoutFollowThroughMinVolumeRatio,
+                               int secondEntryLookback,
+                               int secondEntryMinPullbackBars,
+                               BigDecimal secondEntryMinBodyRatio,
+                               BigDecimal secondEntryMinCloseLocation,
+                               BigDecimal secondEntryInvalidationBuffer) {
     /*
      * 字段大体可分为五组：
      * 1. trend：趋势背景判断

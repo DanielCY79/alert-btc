@@ -5,6 +5,7 @@ import com.mobai.alert.state.backtest.BacktestReport;
 import com.mobai.alert.state.backtest.BatchBacktestResult;
 import com.mobai.alert.state.backtest.SensitivityResult;
 import com.mobai.alert.strategy.policy.CompositeFactorPolicyProfile;
+import com.mobai.alert.strategy.policy.MarketStateMachine;
 import com.mobai.alert.strategy.policy.PolicyWeights;
 import org.junit.jupiter.api.Test;
 
@@ -24,7 +25,7 @@ class StrategyBacktestServiceFormattingTests {
      */
     @Test
     void shouldIncludeRawVsPolicyComparisonInBatchResult() {
-        StrategyBacktestService service = new StrategyBacktestService(null, null, null);
+        StrategyBacktestService service = new StrategyBacktestService(null, null, null, new MarketStateMachine());
         BacktestConfig config = config();
 
         BacktestReport rawReport = new BacktestReport(
@@ -106,11 +107,22 @@ class StrategyBacktestServiceFormattingTests {
                 new BigDecimal("0.008"),
                 new BigDecimal("0.006"),
                 new BigDecimal("1.10"),
+                new BigDecimal("0.001"),
+                new BigDecimal("0.25"),
+                new BigDecimal("0.55"),
+                new BigDecimal("0.80"),
                 43200000L,
                 12,
                 18,
                 18,
                 new BigDecimal("1.50"),
+                new BigDecimal("1.00"),
+                new BigDecimal("0.50"),
+                new BigDecimal("1.20"),
+                new BigDecimal("1.00"),
+                1,
+                new BigDecimal("1.60"),
+                new BigDecimal("0.35"),
                 profile()
         );
     }

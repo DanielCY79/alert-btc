@@ -3,6 +3,7 @@ package com.mobai.alert.strategy.policy;
 import com.mobai.alert.feature.model.CompositeFactors;
 import com.mobai.alert.feature.model.FeatureQuality;
 import com.mobai.alert.feature.model.FeatureSnapshot;
+import com.mobai.alert.state.runtime.MarketState;
 import com.mobai.alert.state.signal.AlertSignal;
 import com.mobai.alert.state.signal.TradeDirection;
 import org.springframework.beans.factory.annotation.Value;
@@ -15,7 +16,7 @@ import java.util.List;
 
 /**
  * 复合因子信号过滤器。
- * 根据多维特征分数对原始策略信号进行加权、否决和上下文补充。
+ * 先做显式市场状态准入，再根据多维特征分数对原始信号加权、否决和补充上下文。
  */
 @Service
 public class CompositeFactorSignalPolicy {
@@ -107,9 +108,6 @@ public class CompositeFactorSignalPolicy {
     @Value("${monitoring.feature.policy.weights.pullback.regime-risk:0.18}")
     private BigDecimal pullbackRegimeRiskWeight;
 
-    /**
-     * 读取当前运行时策略画像。
-     */
     public CompositeFactorPolicyProfile currentProfile() {
         return new CompositeFactorPolicyProfile(
                 enabled,
@@ -149,29 +147,37 @@ public class CompositeFactorSignalPolicy {
         );
     }
 
-    /**
-     * 使用当前配置评估一条信号。
-     */
     public SignalPolicyDecision evaluate(AlertSignal signal, FeatureSnapshot snapshot) {
         return evaluate(signal, snapshot, currentProfile());
     }
 
-    /**
-     * 使用指定画像评估一条信号，并在需要时附加上下文分数。
-     */
     public SignalPolicyDecision evaluate(AlertSignal signal,
                                          FeatureSnapshot snapshot,
                                          CompositeFactorPolicyProfile profile) {
         if (signal == null) {
             return new SignalPolicyDecision(false, null, null, List.of("空信号"));
         }
+
+        List<String> reasons = new ArrayList<>();
+        if (snapshot != null && snapshot.getMarketState() != null) {
+            MarketState marketState = snapshot.getMarketState();
+            reasons.add("市场状态=" + marketState.label());
+            if (marketState != MarketState.UNKNOWN && !isCompatibleWithMarketState(signal, marketState)) {
+                reasons.add(stateMismatchReason(signal, marketState));
+                String contextComment = buildContextComment(null, reasons);
+                return new SignalPolicyDecision(false, signal.withContext(null, contextComment), null, List.copyOf(reasons));
+            }
+        }
+
         if (profile == null || !profile.enabled() || snapshot == null || snapshot.getCompositeFactors() == null) {
-            return new SignalPolicyDecision(true, signal, null, List.of());
+            AlertSignal enrichedSignal = reasons.isEmpty()
+                    ? signal
+                    : signal.withContext(null, buildContextComment(null, reasons));
+            return new SignalPolicyDecision(true, enrichedSignal, null, List.copyOf(reasons));
         }
 
         CompositeFactors factors = snapshot.getCompositeFactors();
         FeatureQuality quality = snapshot.getQuality();
-        List<String> reasons = new ArrayList<>();
         BigDecimal score = profile.baseScore();
         BigDecimal directedTrend = directed(signal, factors.getTrendBiasScore());
         BigDecimal directedBreakout = directed(signal, factors.getBreakoutConfirmationScore());
@@ -251,9 +257,6 @@ public class CompositeFactorSignalPolicy {
         return new SignalPolicyDecision(!blocked, enrichedSignal, normalizedScore, List.copyOf(reasons));
     }
 
-    /**
-     * 根据策略类型返回对应权重配置。
-     */
     private PolicyWeights weightsFor(AlertSignal signal, CompositeFactorPolicyProfile profile) {
         if (isRangeFailure(signal)) {
             return profile.rangeFailureWeights();
@@ -264,9 +267,6 @@ public class CompositeFactorSignalPolicy {
         return profile.breakoutWeights();
     }
 
-    /**
-     * 根据策略类型返回最低通过分。
-     */
     private BigDecimal minScore(AlertSignal signal, CompositeFactorPolicyProfile profile) {
         if (isRangeFailure(signal)) {
             return profile.rangeFailureMinScore();
@@ -286,12 +286,40 @@ public class CompositeFactorSignalPolicy {
     }
 
     private boolean isPullback(AlertSignal signal) {
-        return signal.getType() != null && signal.getType().startsWith("BREAKOUT_PULLBACK");
+        return signal.getType() != null
+                && (signal.getType().startsWith("BREAKOUT_PULLBACK") || signal.getType().startsWith("SECOND_ENTRY"));
     }
 
-    /**
-     * 将分数按交易方向变成“顺着信号方向是否有利”的值。
-     */
+    private boolean isCompatibleWithMarketState(AlertSignal signal, MarketState marketState) {
+        return switch (marketState) {
+            case UNKNOWN -> true;
+            case RANGE -> isRangeFailure(signal) || isBreakout(signal);
+            case BREAKOUT -> isBreakout(signal) || isPullback(signal);
+            case PULLBACK -> isPullback(signal);
+            case TREND -> isPullback(signal);
+        };
+    }
+
+    private String stateMismatchReason(AlertSignal signal, MarketState marketState) {
+        return "拦截：当前市场状态=" + marketState.label() + "，不接受" + signalFamilyLabel(signal);
+    }
+
+    private String signalFamilyLabel(AlertSignal signal) {
+        if (isRangeFailure(signal)) {
+            return "区间失败反转";
+        }
+        if (isPullback(signal)) {
+            if (signal.getType() != null && signal.getType().startsWith("SECOND_ENTRY")) {
+                return "二次入场";
+            }
+            return "突破回踩";
+        }
+        if (isBreakout(signal)) {
+            return "确认突破";
+        }
+        return "该信号";
+    }
+
     private BigDecimal directed(AlertSignal signal, BigDecimal factor) {
         if (factor == null) {
             return null;
@@ -333,14 +361,11 @@ public class CompositeFactorSignalPolicy {
         return value;
     }
 
-    /**
-     * 生成便于通知展示的上下文说明。
-     */
     private String buildContextComment(BigDecimal score, List<String> reasons) {
         StringBuilder builder = new StringBuilder();
         builder.append("综合环境分 ").append(scale(score));
         if (!reasons.isEmpty()) {
-            builder.append(" | ").append(String.join("；", reasons));
+            builder.append(" | ").append(String.join("，", reasons));
         }
         return builder.toString();
     }

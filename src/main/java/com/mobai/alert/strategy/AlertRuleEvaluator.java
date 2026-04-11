@@ -2,8 +2,10 @@ package com.mobai.alert.strategy;
 
 import com.mobai.alert.access.kline.dto.BinanceKlineDTO;
 import com.mobai.alert.state.signal.AlertSignal;
+import com.mobai.alert.strategy.breakout.BreakoutFollowThroughStrategyEvaluator;
 import com.mobai.alert.strategy.breakout.ConfirmedBreakoutStrategyEvaluator;
 import com.mobai.alert.strategy.pullback.BreakoutPullbackStrategyEvaluator;
+import com.mobai.alert.strategy.pullback.SecondEntryStrategyEvaluator;
 import com.mobai.alert.strategy.range.RangeFailureStrategyEvaluator;
 import com.mobai.alert.strategy.shared.StrategySettings;
 import org.springframework.beans.factory.annotation.Value;
@@ -33,7 +35,9 @@ public class AlertRuleEvaluator {
 
     private final RangeFailureStrategyEvaluator rangeFailureStrategyEvaluator = new RangeFailureStrategyEvaluator();
     private final ConfirmedBreakoutStrategyEvaluator confirmedBreakoutStrategyEvaluator = new ConfirmedBreakoutStrategyEvaluator();
+    private final BreakoutFollowThroughStrategyEvaluator breakoutFollowThroughStrategyEvaluator = new BreakoutFollowThroughStrategyEvaluator();
     private final BreakoutPullbackStrategyEvaluator breakoutPullbackStrategyEvaluator = new BreakoutPullbackStrategyEvaluator();
+    private final SecondEntryStrategyEvaluator secondEntryStrategyEvaluator = new SecondEntryStrategyEvaluator();
 
     // 快速均线周期，用来衡量短期价格重心。
     @Value("${monitoring.strategy.trend.fast-period:20}")
@@ -119,6 +123,37 @@ public class AlertRuleEvaluator {
     @Value("${monitoring.strategy.pullback.max-volume-ratio:1.10}")
     private BigDecimal pullbackMaxVolumeRatio;
 
+    // follow-through 确认时，收盘至少要继续守在突破位之外的缓冲比例。
+    @Value("${monitoring.strategy.breakout.follow-through.close-buffer:0.001}")
+    private BigDecimal breakoutFollowThroughCloseBuffer;
+
+    // follow-through K 线最小实体占比。
+    @Value("${monitoring.strategy.breakout.follow-through.min-body-ratio:0.25}")
+    private BigDecimal breakoutFollowThroughMinBodyRatio;
+
+    // follow-through 收盘位置要求，做多看高位收盘，做空看低位收盘。
+    @Value("${monitoring.strategy.breakout.follow-through.min-close-location:0.55}")
+    private BigDecimal breakoutFollowThroughMinCloseLocation;
+
+    // follow-through 不再要求放量突破，但至少不能完全失速。
+    @Value("${monitoring.strategy.breakout.follow-through.min-volume-ratio:0.80}")
+    private BigDecimal breakoutFollowThroughMinVolumeRatio;
+
+    @Value("${monitoring.strategy.second-entry.lookback:12}")
+    private int secondEntryLookback = 12;
+
+    @Value("${monitoring.strategy.second-entry.min-pullback-bars:2}")
+    private int secondEntryMinPullbackBars = 2;
+
+    @Value("${monitoring.strategy.second-entry.min-body-ratio:0.20}")
+    private BigDecimal secondEntryMinBodyRatio = new BigDecimal("0.20");
+
+    @Value("${monitoring.strategy.second-entry.min-close-location:0.55}")
+    private BigDecimal secondEntryMinCloseLocation = new BigDecimal("0.55");
+
+    @Value("${monitoring.strategy.second-entry.invalidation-buffer:0.001}")
+    private BigDecimal secondEntryInvalidationBuffer = new BigDecimal("0.001");
+
     /**
      * 对外暴露“区间下破失败做多”策略。
      * 调用方不需要知道内部实现落在哪个子类，只需要从这里拿结果即可。
@@ -146,6 +181,24 @@ public class AlertRuleEvaluator {
      */
     public Optional<AlertSignal> evaluateTrendBreakdown(List<BinanceKlineDTO> klines) {
         return confirmedBreakoutStrategyEvaluator.evaluateTrendBreakdown(klines, currentSettings());
+    }
+
+    /**
+     * 对外暴露“突破后的 follow-through 接受确认”。
+     */
+    public Optional<AlertSignal> evaluateBreakoutFollowThrough(List<BinanceKlineDTO> klines,
+                                                               BigDecimal breakoutLevel,
+                                                               BigDecimal invalidationPrice,
+                                                               BigDecimal targetPrice,
+                                                               boolean bullishBreakout) {
+        return breakoutFollowThroughStrategyEvaluator.evaluateFollowThrough(
+                klines,
+                breakoutLevel,
+                invalidationPrice,
+                targetPrice,
+                bullishBreakout,
+                currentSettings()
+        );
     }
 
     /**
@@ -184,6 +237,28 @@ public class AlertRuleEvaluator {
         );
     }
 
+    public Optional<AlertSignal> evaluateSecondEntryLong(List<BinanceKlineDTO> klines,
+                                                         BigDecimal referenceLevel,
+                                                         BigDecimal targetPrice) {
+        return secondEntryStrategyEvaluator.evaluateLongSecondEntry(
+                klines,
+                referenceLevel,
+                targetPrice,
+                currentSettings()
+        );
+    }
+
+    public Optional<AlertSignal> evaluateSecondEntryShort(List<BinanceKlineDTO> klines,
+                                                          BigDecimal referenceLevel,
+                                                          BigDecimal targetPrice) {
+        return secondEntryStrategyEvaluator.evaluateShortSecondEntry(
+                klines,
+                referenceLevel,
+                targetPrice,
+                currentSettings()
+        );
+    }
+
     private StrategySettings currentSettings() {
         return new StrategySettings(
                 fastPeriod,
@@ -206,7 +281,16 @@ public class AlertRuleEvaluator {
                 failureMinWickBodyRatio,
                 pullbackTouchTolerance,
                 pullbackHoldBuffer,
-                pullbackMaxVolumeRatio
+                pullbackMaxVolumeRatio,
+                breakoutFollowThroughCloseBuffer,
+                breakoutFollowThroughMinBodyRatio,
+                breakoutFollowThroughMinCloseLocation,
+                breakoutFollowThroughMinVolumeRatio,
+                secondEntryLookback,
+                secondEntryMinPullbackBars,
+                secondEntryMinBodyRatio,
+                secondEntryMinCloseLocation,
+                secondEntryInvalidationBuffer
         );
     }
 }

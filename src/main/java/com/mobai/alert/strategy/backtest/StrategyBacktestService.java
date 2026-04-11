@@ -10,13 +10,17 @@ import com.mobai.alert.state.backtest.BatchBacktestResult;
 import com.mobai.alert.state.backtest.BreakoutMemory;
 import com.mobai.alert.state.backtest.SensitivityResult;
 import com.mobai.alert.state.backtest.TradeRecord;
+import com.mobai.alert.state.runtime.MarketState;
 import com.mobai.alert.state.signal.AlertSignal;
 import com.mobai.alert.state.signal.TradeDirection;
 import com.mobai.alert.strategy.AlertRuleEvaluator;
 import com.mobai.alert.strategy.policy.CompositeFactorPolicyProfile;
 import com.mobai.alert.strategy.policy.CompositeFactorSignalPolicy;
+import com.mobai.alert.strategy.policy.MarketStateDecision;
+import com.mobai.alert.strategy.policy.MarketStateMachine;
 import com.mobai.alert.strategy.policy.PolicyWeights;
 import com.mobai.alert.strategy.policy.SignalPolicyDecision;
+import com.mobai.alert.strategy.shared.StrategySupport;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -126,8 +130,41 @@ public class StrategyBacktestService {
     @Value("${monitoring.strategy.pullback.max-volume-ratio:1.10}")
     private BigDecimal pullbackMaxVolumeRatio;
 
+    @Value("${monitoring.strategy.breakout.follow-through.close-buffer:0.001}")
+    private BigDecimal breakoutFollowThroughCloseBuffer;
+
+    @Value("${monitoring.strategy.breakout.follow-through.min-body-ratio:0.25}")
+    private BigDecimal breakoutFollowThroughMinBodyRatio;
+
+    @Value("${monitoring.strategy.breakout.follow-through.min-close-location:0.55}")
+    private BigDecimal breakoutFollowThroughMinCloseLocation;
+
+    @Value("${monitoring.strategy.breakout.follow-through.min-volume-ratio:0.80}")
+    private BigDecimal breakoutFollowThroughMinVolumeRatio;
+
+    @Value("${monitoring.strategy.second-entry.lookback:12}")
+    private int secondEntryLookback = 12;
+
+    @Value("${monitoring.strategy.second-entry.min-pullback-bars:2}")
+    private int secondEntryMinPullbackBars = 2;
+
+    @Value("${monitoring.strategy.second-entry.min-body-ratio:0.20}")
+    private BigDecimal secondEntryMinBodyRatio = new BigDecimal("0.20");
+
+    @Value("${monitoring.strategy.second-entry.min-close-location:0.55}")
+    private BigDecimal secondEntryMinCloseLocation = new BigDecimal("0.55");
+
+    @Value("${monitoring.strategy.second-entry.invalidation-buffer:0.001}")
+    private BigDecimal secondEntryInvalidationBuffer = new BigDecimal("0.001");
+
     @Value("${monitoring.strategy.breakout.record.ttl.ms:43200000}")
     private long breakoutRecordTtlMs;
+
+    @Value("${monitoring.strategy.breakout.record.max-bars:24}")
+    private int breakoutRecordMaxBars;
+
+    @Value("${monitoring.strategy.breakout.follow-through.max-bars:2}")
+    private int breakoutFollowThroughMaxBars;
 
     @Value("${backtest.holding-bars.range:12}")
     private int rangeHoldingBars;
@@ -141,18 +178,54 @@ public class StrategyBacktestService {
     @Value("${backtest.fallback-target-r.multiple:1.50}")
     private BigDecimal fallbackTargetMultiple;
 
+    @Value("${backtest.position.scale-out.trigger-r:1.00}")
+    private BigDecimal scaleOutTriggerR;
+
+    @Value("${backtest.position.scale-out.fraction:0.50}")
+    private BigDecimal scaleOutFraction;
+
+    @Value("${backtest.position.trailing.activation-r:1.20}")
+    private BigDecimal trailingActivationR;
+
+    @Value("${backtest.position.trailing.distance-r:1.00}")
+    private BigDecimal trailingDistanceR;
+
+    @Value("${backtest.position.pyramid.max-adds:1}")
+    private int pyramidMaxAdds;
+
+    @Value("${backtest.position.pyramid.trigger-r:1.60}")
+    private BigDecimal pyramidTriggerR;
+
+    @Value("${backtest.position.pyramid.add-size:0.35}")
+    private BigDecimal pyramidAddFraction;
+
+    @Value("${backtest.position.failed-follow-through.max-bars:2}")
+    private int failedFollowThroughMaxBars = 2;
+
+    @Value("${backtest.position.failed-follow-through.adverse-r:0.35}")
+    private BigDecimal failedFollowThroughAdverseR = new BigDecimal("0.35");
+
+    @Value("${backtest.position.failed-follow-through.min-body-ratio:0.40}")
+    private BigDecimal failedFollowThroughMinBodyRatio = new BigDecimal("0.40");
+
+    @Value("${backtest.position.failed-follow-through.close-location:0.35}")
+    private BigDecimal failedFollowThroughCloseLocation = new BigDecimal("0.35");
+
     @Value("${backtest.policy.missing-derivative-penalty:0.00}")
     private BigDecimal backtestMissingDerivativePenalty;
 
     private final BacktestFeatureSnapshotService backtestFeatureSnapshotService;
     private final CompositeFactorSignalPolicy compositeFactorSignalPolicy;
+    private final MarketStateMachine marketStateMachine;
 
     public StrategyBacktestService(BinanceApi binanceApi,
                                    BacktestFeatureSnapshotService backtestFeatureSnapshotService,
-                                   CompositeFactorSignalPolicy compositeFactorSignalPolicy) {
+                                   CompositeFactorSignalPolicy compositeFactorSignalPolicy,
+                                   MarketStateMachine marketStateMachine) {
         this.binanceApi = binanceApi;
         this.backtestFeatureSnapshotService = backtestFeatureSnapshotService;
         this.compositeFactorSignalPolicy = compositeFactorSignalPolicy;
+        this.marketStateMachine = marketStateMachine;
     }
 
     /**
@@ -254,17 +327,24 @@ public class StrategyBacktestService {
         List<TradeRecord> trades = new ArrayList<>();
         Map<String, Integer> signalCounts = new LinkedHashMap<>();
         SignalAudit audit = new SignalAudit();
+        MarketState currentMarketState = MarketState.UNKNOWN;
 
-        TradeRecord activeTrade = null;
+        ManagedPosition activePosition = null;
         for (int barIndex = 1; barIndex < history.size(); barIndex++) {
             BinanceKlineDTO currentBar = history.get(barIndex);
-            cleanupExpiredBreakoutMemories(breakoutMemories, currentBar.getStartTime(), config.breakoutRecordTtlMs());
+            List<BinanceKlineDTO> visibleKlines = history.subList(0, barIndex + 1);
+            cleanupExpiredBreakoutMemories(breakoutMemories, visibleKlines, config);
+            FeatureSnapshot featureSnapshot = backtestFeatureSnapshotService == null
+                    ? null
+                    : backtestFeatureSnapshotService.buildSnapshot(config.symbol(), config.interval(), visibleKlines);
+            if (featureSnapshot != null) {
+                MarketStateDecision stateDecision = marketStateMachine.evaluate(featureSnapshot, currentMarketState);
+                featureSnapshot.setMarketState(stateDecision.state());
+                featureSnapshot.setMarketStateComment(stateDecision.comment());
+                currentMarketState = stateDecision.state();
+            }
 
-            if (activeTrade == null) {
-                List<BinanceKlineDTO> visibleKlines = history.subList(0, barIndex + 1);
-                FeatureSnapshot featureSnapshot = applyCompositePolicy
-                        ? backtestFeatureSnapshotService.buildSnapshot(config.symbol(), config.interval(), visibleKlines)
-                        : null;
+            if (activePosition == null) {
                 Optional<AlertSignal> signalOptional = detectSignal(
                         visibleKlines,
                         evaluator,
@@ -277,18 +357,18 @@ public class StrategyBacktestService {
                 if (signalOptional.isPresent()) {
                     AlertSignal signal = signalOptional.get();
                     signalCounts.merge(signal.getType(), 1, Integer::sum);
-                    activeTrade = openTrade(signal, currentBar, barIndex, config);
+                    activePosition = openPosition(signal, currentBar, barIndex, config);
                 }
             }
 
-            if (activeTrade != null) {
-                activeTrade = evaluateTradeOnBar(activeTrade, currentBar, barIndex, trades, config);
+            if (activePosition != null) {
+                activePosition = evaluatePositionOnBar(activePosition, currentBar, barIndex, trades, config);
             }
         }
 
-        if (activeTrade != null) {
+        if (activePosition != null) {
             BinanceKlineDTO lastBar = history.get(history.size() - 1);
-            trades.add(activeTrade.forceClose(lastBar.getEndTime(), decimal(lastBar.getClose()), "FORCED_END"));
+            trades.add(activePosition.forceClose(lastBar.getEndTime(), decimal(lastBar.getClose()), "FORCED_END"));
         }
 
         BacktestReport report = summarize(history, trades, signalCounts, audit, applyCompositePolicy, config);
@@ -419,33 +499,49 @@ public class StrategyBacktestService {
             return signal;
         }
 
-        signal = qualifySignal(
-                evaluator.evaluateTrendBreakout(klines),
+        BreakoutConfirmationResult confirmation = confirmBreakoutMemory(
+                "LONG",
+                "SHORT",
+                klines,
+                evaluator,
+                breakoutMemories,
                 featureSnapshot,
                 applyCompositePolicy,
                 policyProfile,
                 audit
         );
-        if (signal.isPresent()) {
-            breakoutMemories.put("LONG", new BreakoutMemory(signal.get().getTriggerPrice(), signal.get().getTargetPrice(), signal.get().getKline().getEndTime()));
-            breakoutMemories.remove("SHORT");
-            return signal;
+        if (confirmation.confirmed()) {
+            return confirmation.signal();
         }
 
-        signal = qualifySignal(
-                evaluator.evaluateTrendBreakdown(klines),
+        confirmation = confirmBreakoutMemory(
+                "SHORT",
+                "LONG",
+                klines,
+                evaluator,
+                breakoutMemories,
                 featureSnapshot,
                 applyCompositePolicy,
                 policyProfile,
                 audit
         );
-        if (signal.isPresent()) {
-            breakoutMemories.put("SHORT", new BreakoutMemory(signal.get().getTriggerPrice(), signal.get().getTargetPrice(), signal.get().getKline().getEndTime()));
-            breakoutMemories.remove("LONG");
-            return signal;
+        if (confirmation.confirmed()) {
+            return confirmation.signal();
         }
 
-        BreakoutMemory longMemory = breakoutMemories.get("LONG");
+        Optional<AlertSignal> breakoutCandidate = evaluator.evaluateTrendBreakout(klines);
+        if (breakoutCandidate.isPresent()) {
+            rememberBreakoutCandidate(breakoutMemories, "LONG", "SHORT", breakoutCandidate.get(), true);
+            return Optional.empty();
+        }
+
+        breakoutCandidate = evaluator.evaluateTrendBreakdown(klines);
+        if (breakoutCandidate.isPresent()) {
+            rememberBreakoutCandidate(breakoutMemories, "SHORT", "LONG", breakoutCandidate.get(), false);
+            return Optional.empty();
+        }
+
+        BreakoutMemory longMemory = activeConfirmedMemory(breakoutMemories, "LONG", klines, false);
         if (longMemory != null) {
             signal = qualifySignal(
                     evaluator.evaluateBreakoutPullback(klines, longMemory.breakoutLevel(), longMemory.targetPrice(), true),
@@ -459,7 +555,7 @@ public class StrategyBacktestService {
             }
         }
 
-        BreakoutMemory shortMemory = breakoutMemories.get("SHORT");
+        BreakoutMemory shortMemory = activeConfirmedMemory(breakoutMemories, "SHORT", klines, false);
         if (shortMemory != null) {
             signal = qualifySignal(
                     evaluator.evaluateBreakoutPullback(klines, shortMemory.breakoutLevel(), shortMemory.targetPrice(), false),
@@ -473,7 +569,156 @@ public class StrategyBacktestService {
             }
         }
 
+        if (supportsSecondEntry(featureSnapshot)) {
+            signal = qualifySignal(
+                    evaluator.evaluateSecondEntryLong(
+                            klines,
+                            longMemory == null ? null : longMemory.breakoutLevel(),
+                            longMemory == null ? null : longMemory.targetPrice()
+                    ),
+                    featureSnapshot,
+                    applyCompositePolicy,
+                    policyProfile,
+                    audit
+            );
+            if (signal.isPresent()) {
+                return signal;
+            }
+
+            signal = qualifySignal(
+                    evaluator.evaluateSecondEntryShort(
+                            klines,
+                            shortMemory == null ? null : shortMemory.breakoutLevel(),
+                            shortMemory == null ? null : shortMemory.targetPrice()
+                    ),
+                    featureSnapshot,
+                    applyCompositePolicy,
+                    policyProfile,
+                    audit
+            );
+            if (signal.isPresent()) {
+                return signal;
+            }
+        }
+
         return Optional.empty();
+    }
+
+    private BreakoutConfirmationResult confirmBreakoutMemory(String key,
+                                                             String oppositeKey,
+                                                             List<BinanceKlineDTO> klines,
+                                                             AlertRuleEvaluator evaluator,
+                                                             Map<String, BreakoutMemory> breakoutMemories,
+                                                             FeatureSnapshot featureSnapshot,
+                                                             boolean applyCompositePolicy,
+                                                             CompositeFactorPolicyProfile policyProfile,
+                                                             SignalAudit audit) {
+        BreakoutMemory memory = activeConfirmedMemory(breakoutMemories, key, klines, true);
+        if (memory == null || memory.followThroughConfirmed()) {
+            return BreakoutConfirmationResult.notConfirmed();
+        }
+
+        Optional<AlertSignal> followThrough = evaluator.evaluateBreakoutFollowThrough(
+                klines,
+                memory.breakoutLevel(),
+                memory.invalidationPrice(),
+                memory.targetPrice(),
+                memory.bullish()
+        );
+        if (followThrough.isEmpty()) {
+            return BreakoutConfirmationResult.notConfirmed();
+        }
+
+        breakoutMemories.put(key, memory.confirm(followThrough.get().getKline().getEndTime()));
+        breakoutMemories.remove(oppositeKey);
+
+        Optional<AlertSignal> qualified = qualifySignal(
+                followThrough,
+                featureSnapshot,
+                applyCompositePolicy,
+                policyProfile,
+                audit
+        );
+        return new BreakoutConfirmationResult(true, qualified);
+    }
+
+    private void rememberBreakoutCandidate(Map<String, BreakoutMemory> breakoutMemories,
+                                           String key,
+                                           String oppositeKey,
+                                           AlertSignal signal,
+                                           boolean bullish) {
+        breakoutMemories.put(key, new BreakoutMemory(
+                signal.getTriggerPrice(),
+                signal.getInvalidationPrice(),
+                signal.getTargetPrice(),
+                signal.getKline().getEndTime(),
+                bullish,
+                false,
+                null
+        ));
+        breakoutMemories.remove(oppositeKey);
+    }
+
+    private BreakoutMemory activeConfirmedMemory(Map<String, BreakoutMemory> breakoutMemories,
+                                                 String key,
+                                                 List<BinanceKlineDTO> klines,
+                                                 boolean allowPending) {
+        BreakoutMemory memory = breakoutMemories.get(key);
+        if (memory == null) {
+            return null;
+        }
+        if (isBreakoutMemoryExpired(memory, klines) || (!allowPending && !memory.followThroughConfirmed())) {
+            breakoutMemories.remove(key);
+            return null;
+        }
+        if (!allowPending && isBreakoutRejected(memory, klines)) {
+            breakoutMemories.remove(key);
+            return null;
+        }
+        if (allowPending
+                && !memory.followThroughConfirmed()
+                && (barsSinceBreakout(klines, memory.signalTime()) > breakoutFollowThroughMaxBars || isBreakoutRejected(memory, klines))) {
+            breakoutMemories.remove(key);
+            return null;
+        }
+        return memory;
+    }
+
+    private boolean isBreakoutMemoryExpired(BreakoutMemory memory, List<BinanceKlineDTO> klines) {
+        List<BinanceKlineDTO> closedKlines = closedKlines(klines);
+        if (closedKlines.isEmpty()) {
+            return false;
+        }
+        long latestClosedTime = closedKlines.get(closedKlines.size() - 1).getEndTime();
+        if (latestClosedTime - memory.signalTime() > breakoutRecordTtlMs) {
+            return true;
+        }
+        return barsSinceBreakout(klines, memory.signalTime()) > breakoutRecordMaxBars;
+    }
+
+    private boolean isBreakoutRejected(BreakoutMemory memory, List<BinanceKlineDTO> klines) {
+        List<BinanceKlineDTO> closedKlines = closedKlines(klines);
+        if (closedKlines.isEmpty()) {
+            return false;
+        }
+        BigDecimal latestClose = decimal(closedKlines.get(closedKlines.size() - 1).getClose());
+        return memory.bullish()
+                ? latestClose.compareTo(memory.invalidationPrice()) <= 0
+                : latestClose.compareTo(memory.invalidationPrice()) >= 0;
+    }
+
+    private int barsSinceBreakout(List<BinanceKlineDTO> klines, long signalTime) {
+        int bars = 0;
+        for (BinanceKlineDTO kline : closedKlines(klines)) {
+            if (kline.getEndTime() > signalTime) {
+                bars++;
+            }
+        }
+        return bars;
+    }
+
+    private List<BinanceKlineDTO> closedKlines(List<BinanceKlineDTO> klines) {
+        return klines.size() < 2 ? List.of() : klines.subList(0, klines.size() - 1);
     }
 
     /**
@@ -490,11 +735,10 @@ public class StrategyBacktestService {
 
         AlertSignal signal = rawSignal.get();
         audit.recordRaw(signal.getType());
-        if (!applyCompositePolicy) {
-            return Optional.of(signal);
-        }
-
-        SignalPolicyDecision decision = compositeFactorSignalPolicy.evaluate(signal, featureSnapshot, policyProfile);
+        CompositeFactorPolicyProfile evaluationProfile = applyCompositePolicy || policyProfile == null
+                ? policyProfile
+                : policyProfile.withEnabled(false);
+        SignalPolicyDecision decision = compositeFactorSignalPolicy.evaluate(signal, featureSnapshot, evaluationProfile);
         if (decision.allowed()) {
             return Optional.of(decision.signal());
         }
@@ -503,10 +747,20 @@ public class StrategyBacktestService {
         return Optional.empty();
     }
 
+    private boolean supportsSecondEntry(FeatureSnapshot featureSnapshot) {
+        if (featureSnapshot == null || featureSnapshot.getMarketState() == null) {
+            return true;
+        }
+        return switch (featureSnapshot.getMarketState()) {
+            case UNKNOWN, BREAKOUT, PULLBACK, TREND -> true;
+            case RANGE -> false;
+        };
+    }
+
     /**
      * 根据信号和当前 K 线开盘价创建新仓位。
      */
-    private TradeRecord openTrade(AlertSignal signal, BinanceKlineDTO entryBar, int barIndex, BacktestConfig config) {
+    private ManagedPosition openPosition(AlertSignal signal, BinanceKlineDTO entryBar, int barIndex, BacktestConfig config) {
         BigDecimal entryPrice = decimal(entryBar.getOpen());
         BigDecimal stopPrice = signal.getInvalidationPrice();
         BigDecimal riskPerUnit = entryPrice.subtract(stopPrice).abs();
@@ -522,7 +776,7 @@ public class StrategyBacktestService {
                     : entryPrice.subtract(rewardDistance);
         }
 
-        return new TradeRecord(
+        return new ManagedPosition(
                 signal.getType(),
                 signal.getDirection(),
                 signal.getKline().getEndTime(),
@@ -532,80 +786,106 @@ public class StrategyBacktestService {
                 stopPrice,
                 targetPrice,
                 riskPerUnit,
-                maxHoldingBars(signal.getType(), config)
+                maxHoldingBars(signal.getType(), config),
+                config.scaleOutTriggerR(),
+                config.scaleOutFraction(),
+                config.trailingActivationR(),
+                config.trailingDistanceR(),
+                config.pyramidMaxAdds(),
+                config.pyramidTriggerR(),
+                config.pyramidAddFraction(),
+                failedFollowThroughMaxBars,
+                failedFollowThroughAdverseR,
+                failedFollowThroughMinBodyRatio,
+                failedFollowThroughCloseLocation
         );
     }
 
     /**
      * 在单根 K 线上评估持仓是否止损、止盈或超时退出。
      */
-    private TradeRecord evaluateTradeOnBar(TradeRecord trade,
-                                           BinanceKlineDTO bar,
-                                           int barIndex,
-                                           List<TradeRecord> completedTrades,
-                                           BacktestConfig config) {
+    private ManagedPosition evaluatePositionOnBar(ManagedPosition position,
+                                                  BinanceKlineDTO bar,
+                                                  int barIndex,
+                                                  List<TradeRecord> completedTrades,
+                                                  BacktestConfig config) {
         BigDecimal open = decimal(bar.getOpen());
         BigDecimal high = decimal(bar.getHigh());
         BigDecimal low = decimal(bar.getLow());
         BigDecimal close = decimal(bar.getClose());
 
-        if (trade.direction() == TradeDirection.LONG) {
-            if (open.compareTo(trade.stopPrice()) <= 0) {
-                completedTrades.add(trade.close(bar.getEndTime(), open, "GAP_STOP"));
+        if (position.direction() == TradeDirection.LONG) {
+            if (open.compareTo(position.stopPrice()) <= 0) {
+                completedTrades.add(position.closeAll(bar.getEndTime(), open, "GAP_STOP"));
                 return null;
             }
-            if (open.compareTo(trade.targetPrice()) >= 0) {
-                completedTrades.add(trade.close(bar.getEndTime(), open, "GAP_TARGET"));
+            if (open.compareTo(position.targetPrice()) >= 0) {
+                completedTrades.add(position.closeAll(bar.getEndTime(), open, "GAP_TARGET"));
                 return null;
             }
 
-            boolean hitStop = low.compareTo(trade.stopPrice()) <= 0;
-            boolean hitTarget = high.compareTo(trade.targetPrice()) >= 0;
+            position.activatePendingAddOn(open);
+
+            boolean hitStop = low.compareTo(position.stopPrice()) <= 0;
+            boolean hitTarget = high.compareTo(position.targetPrice()) >= 0;
             if (hitStop && hitTarget) {
-                completedTrades.add(trade.close(bar.getEndTime(), trade.stopPrice(), "BOTH_HIT_STOP_PRIORITY"));
+                completedTrades.add(position.closeAll(bar.getEndTime(), position.stopPrice(), "BOTH_HIT_STOP_PRIORITY"));
                 return null;
             }
             if (hitStop) {
-                completedTrades.add(trade.close(bar.getEndTime(), trade.stopPrice(), "STOP"));
+                completedTrades.add(position.closeAll(bar.getEndTime(), position.stopPrice(), "STOP"));
                 return null;
             }
+            if (position.canScaleOut() && high.compareTo(position.scaleOutPrice()) >= 0) {
+                position.scaleOut(position.scaleOutPrice());
+            }
             if (hitTarget) {
-                completedTrades.add(trade.close(bar.getEndTime(), trade.targetPrice(), "TARGET"));
+                completedTrades.add(position.closeAll(bar.getEndTime(), position.targetPrice(), "TARGET"));
                 return null;
             }
         } else {
-            if (open.compareTo(trade.stopPrice()) >= 0) {
-                completedTrades.add(trade.close(bar.getEndTime(), open, "GAP_STOP"));
+            if (open.compareTo(position.stopPrice()) >= 0) {
+                completedTrades.add(position.closeAll(bar.getEndTime(), open, "GAP_STOP"));
                 return null;
             }
-            if (open.compareTo(trade.targetPrice()) <= 0) {
-                completedTrades.add(trade.close(bar.getEndTime(), open, "GAP_TARGET"));
+            if (open.compareTo(position.targetPrice()) <= 0) {
+                completedTrades.add(position.closeAll(bar.getEndTime(), open, "GAP_TARGET"));
                 return null;
             }
 
-            boolean hitStop = high.compareTo(trade.stopPrice()) >= 0;
-            boolean hitTarget = low.compareTo(trade.targetPrice()) <= 0;
+            position.activatePendingAddOn(open);
+
+            boolean hitStop = high.compareTo(position.stopPrice()) >= 0;
+            boolean hitTarget = low.compareTo(position.targetPrice()) <= 0;
             if (hitStop && hitTarget) {
-                completedTrades.add(trade.close(bar.getEndTime(), trade.stopPrice(), "BOTH_HIT_STOP_PRIORITY"));
+                completedTrades.add(position.closeAll(bar.getEndTime(), position.stopPrice(), "BOTH_HIT_STOP_PRIORITY"));
                 return null;
             }
             if (hitStop) {
-                completedTrades.add(trade.close(bar.getEndTime(), trade.stopPrice(), "STOP"));
+                completedTrades.add(position.closeAll(bar.getEndTime(), position.stopPrice(), "STOP"));
                 return null;
             }
+            if (position.canScaleOut() && low.compareTo(position.scaleOutPrice()) <= 0) {
+                position.scaleOut(position.scaleOutPrice());
+            }
             if (hitTarget) {
-                completedTrades.add(trade.close(bar.getEndTime(), trade.targetPrice(), "TARGET"));
+                completedTrades.add(position.closeAll(bar.getEndTime(), position.targetPrice(), "TARGET"));
                 return null;
             }
         }
 
-        int heldBars = barIndex - trade.entryBarIndex() + 1;
-        if (heldBars >= trade.maxHoldingBars()) {
-            completedTrades.add(trade.close(bar.getEndTime(), close, "TIME"));
+        int heldBars = barIndex - position.entryBarIndex() + 1;
+        if (position.shouldExitFailedFollowThrough(bar, heldBars)) {
+            completedTrades.add(position.closeAll(bar.getEndTime(), close, "FAILED_FOLLOW_THROUGH"));
+            return null;
+        }
+        if (heldBars >= position.maxHoldingBars()) {
+            completedTrades.add(position.closeAll(bar.getEndTime(), close, "TIME"));
             return null;
         }
 
-        return trade;
+        position.updateAfterBar(high, low, close);
+        return position;
     }
 
     /**
@@ -671,8 +951,23 @@ public class StrategyBacktestService {
     /**
      * 清理超时的突破记忆。
      */
-    private void cleanupExpiredBreakoutMemories(Map<String, BreakoutMemory> breakoutMemories, long currentTime, long ttlMs) {
-        breakoutMemories.entrySet().removeIf(entry -> currentTime - entry.getValue().signalTime() > ttlMs);
+    private void cleanupExpiredBreakoutMemories(Map<String, BreakoutMemory> breakoutMemories,
+                                                List<BinanceKlineDTO> visibleKlines,
+                                                BacktestConfig config) {
+        List<BinanceKlineDTO> closedKlines = closedKlines(visibleKlines);
+        if (closedKlines.isEmpty()) {
+            return;
+        }
+        long latestClosedTime = closedKlines.get(closedKlines.size() - 1).getEndTime();
+        breakoutMemories.entrySet().removeIf(entry -> {
+            BreakoutMemory memory = entry.getValue();
+            long elapsedMs = latestClosedTime - memory.signalTime();
+            int barsSince = barsSinceBreakout(visibleKlines, memory.signalTime());
+            if (!memory.followThroughConfirmed() && barsSince > breakoutFollowThroughMaxBars) {
+                return true;
+            }
+            return elapsedMs > config.breakoutRecordTtlMs() || barsSince > breakoutRecordMaxBars;
+        });
     }
 
     /**
@@ -694,7 +989,7 @@ public class StrategyBacktestService {
         if (signalType.startsWith("RANGE_FAILURE")) {
             return config.rangeHoldingBars();
         }
-        if (signalType.startsWith("BREAKOUT_PULLBACK")) {
+        if (signalType.startsWith("BREAKOUT_PULLBACK") || signalType.startsWith("SECOND_ENTRY")) {
             return config.pullbackHoldingBars();
         }
         return config.breakoutHoldingBars();
@@ -772,6 +1067,15 @@ public class StrategyBacktestService {
         setField(evaluator, "pullbackTouchTolerance", config.pullbackTouchTolerance());
         setField(evaluator, "pullbackHoldBuffer", config.pullbackHoldBuffer());
         setField(evaluator, "pullbackMaxVolumeRatio", config.pullbackMaxVolumeRatio());
+        setField(evaluator, "breakoutFollowThroughCloseBuffer", config.breakoutFollowThroughCloseBuffer());
+        setField(evaluator, "breakoutFollowThroughMinBodyRatio", config.breakoutFollowThroughMinBodyRatio());
+        setField(evaluator, "breakoutFollowThroughMinCloseLocation", config.breakoutFollowThroughMinCloseLocation());
+        setField(evaluator, "breakoutFollowThroughMinVolumeRatio", config.breakoutFollowThroughMinVolumeRatio());
+        setField(evaluator, "secondEntryLookback", secondEntryLookback);
+        setField(evaluator, "secondEntryMinPullbackBars", secondEntryMinPullbackBars);
+        setField(evaluator, "secondEntryMinBodyRatio", secondEntryMinBodyRatio);
+        setField(evaluator, "secondEntryMinCloseLocation", secondEntryMinCloseLocation);
+        setField(evaluator, "secondEntryInvalidationBuffer", secondEntryInvalidationBuffer);
         return evaluator;
     }
 
@@ -820,11 +1124,22 @@ public class StrategyBacktestService {
                 pullbackTouchTolerance,
                 pullbackHoldBuffer,
                 pullbackMaxVolumeRatio,
+                breakoutFollowThroughCloseBuffer,
+                breakoutFollowThroughMinBodyRatio,
+                breakoutFollowThroughMinCloseLocation,
+                breakoutFollowThroughMinVolumeRatio,
                 breakoutRecordTtlMs,
                 rangeHoldingBars,
                 breakoutHoldingBars,
                 pullbackHoldingBars,
                 fallbackTargetMultiple,
+                scaleOutTriggerR,
+                scaleOutFraction,
+                trailingActivationR,
+                trailingDistanceR,
+                pyramidMaxAdds,
+                pyramidTriggerR,
+                pyramidAddFraction,
                 backtestPolicyProfile
         );
     }
@@ -877,6 +1192,317 @@ public class StrategyBacktestService {
      * 回测信号统计器。
      * 记录原始信号数量以及被复合因子拦截的分布。
      */
+    private record BreakoutConfirmationResult(boolean confirmed, Optional<AlertSignal> signal) {
+        private static BreakoutConfirmationResult notConfirmed() {
+            return new BreakoutConfirmationResult(false, Optional.empty());
+        }
+    }
+
+    private static final class ManagedPosition {
+        private final String signalType;
+        private final TradeDirection direction;
+        private final long signalTime;
+        private final long entryTime;
+        private final int entryBarIndex;
+        private final BigDecimal entryPrice;
+        private final BigDecimal initialStopPrice;
+        private final BigDecimal targetPrice;
+        private final BigDecimal riskPerUnit;
+        private final int maxHoldingBars;
+        private final BigDecimal scaleOutFraction;
+        private final BigDecimal scaleOutPrice;
+        private final BigDecimal trailingActivationPrice;
+        private final BigDecimal trailingDistancePrice;
+        private final int pyramidMaxAdds;
+        private final BigDecimal pyramidTriggerPrice;
+        private final BigDecimal pyramidAddFraction;
+        private final int failedFollowThroughMaxBars;
+        private final BigDecimal failedFollowThroughAdverseR;
+        private final BigDecimal failedFollowThroughMinBodyRatio;
+        private final BigDecimal failedFollowThroughCloseLocation;
+        private final List<PositionLot> openLots = new ArrayList<>();
+        private BigDecimal stopPrice;
+        private BigDecimal realizedR = ZERO;
+        private boolean scaleOutTaken;
+        private int addOnsUsed;
+        private boolean pendingAddOn;
+        private BigDecimal highestHigh;
+        private BigDecimal lowestLow;
+
+        private ManagedPosition(String signalType,
+                                TradeDirection direction,
+                                long signalTime,
+                                long entryTime,
+                                int entryBarIndex,
+                                BigDecimal entryPrice,
+                                BigDecimal initialStopPrice,
+                                BigDecimal targetPrice,
+                                BigDecimal riskPerUnit,
+                                int maxHoldingBars,
+                                BigDecimal scaleOutTriggerR,
+                                BigDecimal scaleOutFraction,
+                                BigDecimal trailingActivationR,
+                                BigDecimal trailingDistanceR,
+                                int pyramidMaxAdds,
+                                BigDecimal pyramidTriggerR,
+                                BigDecimal pyramidAddFraction,
+                                int failedFollowThroughMaxBars,
+                                BigDecimal failedFollowThroughAdverseR,
+                                BigDecimal failedFollowThroughMinBodyRatio,
+                                BigDecimal failedFollowThroughCloseLocation) {
+            this.signalType = signalType;
+            this.direction = direction;
+            this.signalTime = signalTime;
+            this.entryTime = entryTime;
+            this.entryBarIndex = entryBarIndex;
+            this.entryPrice = entryPrice;
+            this.initialStopPrice = initialStopPrice;
+            this.targetPrice = targetPrice;
+            this.riskPerUnit = riskPerUnit;
+            this.maxHoldingBars = maxHoldingBars;
+            this.scaleOutFraction = clampFraction(scaleOutFraction);
+            this.scaleOutPrice = directionalPrice(entryPrice, riskPerUnit.multiply(scaleOutTriggerR), direction);
+            this.trailingActivationPrice = directionalPrice(entryPrice, riskPerUnit.multiply(trailingActivationR), direction);
+            this.trailingDistancePrice = riskPerUnit.multiply(trailingDistanceR);
+            this.pyramidMaxAdds = Math.max(0, pyramidMaxAdds);
+            this.pyramidTriggerPrice = directionalPrice(entryPrice, riskPerUnit.multiply(pyramidTriggerR), direction);
+            this.pyramidAddFraction = clampFraction(pyramidAddFraction);
+            this.failedFollowThroughMaxBars = Math.max(0, failedFollowThroughMaxBars);
+            this.failedFollowThroughAdverseR = failedFollowThroughAdverseR == null ? ZERO : failedFollowThroughAdverseR.max(ZERO);
+            this.failedFollowThroughMinBodyRatio = failedFollowThroughMinBodyRatio == null ? ZERO : failedFollowThroughMinBodyRatio.max(ZERO);
+            this.failedFollowThroughCloseLocation = failedFollowThroughCloseLocation == null
+                    ? new BigDecimal("0.35")
+                    : failedFollowThroughCloseLocation;
+            this.stopPrice = initialStopPrice;
+            this.highestHigh = entryPrice;
+            this.lowestLow = entryPrice;
+            this.openLots.add(new PositionLot(entryPrice, BigDecimal.ONE));
+        }
+
+        private TradeDirection direction() {
+            return direction;
+        }
+
+        private BigDecimal stopPrice() {
+            return stopPrice;
+        }
+
+        private BigDecimal targetPrice() {
+            return targetPrice;
+        }
+
+        private int entryBarIndex() {
+            return entryBarIndex;
+        }
+
+        private int maxHoldingBars() {
+            return maxHoldingBars;
+        }
+
+        private BigDecimal scaleOutPrice() {
+            return scaleOutPrice;
+        }
+
+        private boolean canScaleOut() {
+            if (scaleOutTaken || scaleOutFraction.compareTo(ZERO) <= 0 || remainingSize().compareTo(ZERO) <= 0) {
+                return false;
+            }
+            return direction == TradeDirection.LONG
+                    ? scaleOutPrice.compareTo(entryPrice) > 0 && scaleOutPrice.compareTo(targetPrice) < 0
+                    : scaleOutPrice.compareTo(entryPrice) < 0 && scaleOutPrice.compareTo(targetPrice) > 0;
+        }
+
+        private void scaleOut(BigDecimal exitPrice) {
+            BigDecimal sizeToClose = remainingSize().multiply(scaleOutFraction);
+            reduceExposure(sizeToClose, exitPrice);
+            scaleOutTaken = true;
+            if (direction == TradeDirection.LONG && stopPrice.compareTo(entryPrice) < 0) {
+                stopPrice = entryPrice;
+            }
+            if (direction == TradeDirection.SHORT && stopPrice.compareTo(entryPrice) > 0) {
+                stopPrice = entryPrice;
+            }
+        }
+
+        private void activatePendingAddOn(BigDecimal openPrice) {
+            if (!pendingAddOn || addOnsUsed >= pyramidMaxAdds || pyramidAddFraction.compareTo(ZERO) <= 0) {
+                return;
+            }
+            openLots.add(new PositionLot(openPrice, pyramidAddFraction));
+            addOnsUsed++;
+            pendingAddOn = false;
+        }
+
+        private void updateAfterBar(BigDecimal high, BigDecimal low, BigDecimal close) {
+            if (high.compareTo(highestHigh) > 0) {
+                highestHigh = high;
+            }
+            if (low.compareTo(lowestLow) < 0) {
+                lowestLow = low;
+            }
+            updateTrailingStop();
+            scheduleAddOnIfNeeded(close);
+        }
+
+        private void updateTrailingStop() {
+            if (trailingDistancePrice.compareTo(ZERO) <= 0) {
+                return;
+            }
+            if (direction == TradeDirection.LONG && highestHigh.compareTo(trailingActivationPrice) >= 0) {
+                BigDecimal candidateStop = highestHigh.subtract(trailingDistancePrice);
+                if (candidateStop.compareTo(stopPrice) > 0) {
+                    stopPrice = candidateStop;
+                }
+            }
+            if (direction == TradeDirection.SHORT && lowestLow.compareTo(trailingActivationPrice) <= 0) {
+                BigDecimal candidateStop = lowestLow.add(trailingDistancePrice);
+                if (candidateStop.compareTo(stopPrice) < 0) {
+                    stopPrice = candidateStop;
+                }
+            }
+        }
+
+        private void scheduleAddOnIfNeeded(BigDecimal close) {
+            if (pendingAddOn || addOnsUsed >= pyramidMaxAdds || pyramidAddFraction.compareTo(ZERO) <= 0) {
+                return;
+            }
+            if (!scaleOutTaken || !hasProtectedStop()) {
+                return;
+            }
+            if (direction == TradeDirection.LONG && close.compareTo(pyramidTriggerPrice) >= 0) {
+                pendingAddOn = true;
+            }
+            if (direction == TradeDirection.SHORT && close.compareTo(pyramidTriggerPrice) <= 0) {
+                pendingAddOn = true;
+            }
+        }
+
+        private boolean hasProtectedStop() {
+            return direction == TradeDirection.LONG
+                    ? stopPrice.compareTo(entryPrice) >= 0
+                    : stopPrice.compareTo(entryPrice) <= 0;
+        }
+
+        private boolean shouldExitFailedFollowThrough(BinanceKlineDTO bar, int heldBars) {
+            if (!isTrendContinuationSignal()
+                    || scaleOutTaken
+                    || failedFollowThroughMaxBars <= 0
+                    || heldBars > failedFollowThroughMaxBars
+                    || failedFollowThroughAdverseR.compareTo(ZERO) <= 0) {
+                return false;
+            }
+
+            BigDecimal close = StrategySupport.valueOf(bar.getClose());
+            BigDecimal adverseThreshold = riskPerUnit.multiply(failedFollowThroughAdverseR);
+            BigDecimal bodyRatio = StrategySupport.bodyRatio(bar);
+            BigDecimal closeLocation = StrategySupport.closeLocation(bar);
+            if (direction == TradeDirection.LONG) {
+                return close.compareTo(entryPrice.subtract(adverseThreshold)) <= 0
+                        && StrategySupport.isBearish(bar)
+                        && bodyRatio.compareTo(failedFollowThroughMinBodyRatio) >= 0
+                        && closeLocation.compareTo(failedFollowThroughCloseLocation) <= 0;
+            }
+
+            BigDecimal strongOppositeClose = BigDecimal.ONE.subtract(failedFollowThroughCloseLocation);
+            return close.compareTo(entryPrice.add(adverseThreshold)) >= 0
+                    && StrategySupport.isBullish(bar)
+                    && bodyRatio.compareTo(failedFollowThroughMinBodyRatio) >= 0
+                    && closeLocation.compareTo(strongOppositeClose) >= 0;
+        }
+
+        private TradeRecord closeAll(long exitTime, BigDecimal exitPrice, String exitReason) {
+            reduceExposure(remainingSize(), exitPrice);
+            TradeRecord tradeRecord = new TradeRecord(
+                    signalType,
+                    direction,
+                    signalTime,
+                    entryTime,
+                    entryBarIndex,
+                    entryPrice,
+                    initialStopPrice,
+                    targetPrice,
+                    riskPerUnit,
+                    maxHoldingBars
+            );
+            return tradeRecord.closeManaged(exitTime, exitPrice, decorateReason(exitReason), realizedR);
+        }
+
+        private TradeRecord forceClose(long exitTime, BigDecimal exitPrice, String exitReason) {
+            return closeAll(exitTime, exitPrice, exitReason);
+        }
+
+        private void reduceExposure(BigDecimal sizeToClose, BigDecimal exitPrice) {
+            BigDecimal remainingToClose = sizeToClose.min(remainingSize()).max(ZERO);
+            if (remainingToClose.compareTo(ZERO) <= 0) {
+                return;
+            }
+
+            for (int i = 0; i < openLots.size() && remainingToClose.compareTo(ZERO) > 0; ) {
+                PositionLot lot = openLots.get(i);
+                BigDecimal closingSize = lot.size.min(remainingToClose);
+                realizedR = realizedR.add(realizedRFor(lot.entryPrice, exitPrice, closingSize));
+                lot.size = lot.size.subtract(closingSize);
+                remainingToClose = remainingToClose.subtract(closingSize);
+                if (lot.size.compareTo(ZERO) <= 0) {
+                    openLots.remove(i);
+                } else {
+                    i++;
+                }
+            }
+        }
+
+        private BigDecimal realizedRFor(BigDecimal lotEntryPrice, BigDecimal exitPrice, BigDecimal size) {
+            BigDecimal pnl = direction == TradeDirection.LONG
+                    ? exitPrice.subtract(lotEntryPrice)
+                    : lotEntryPrice.subtract(exitPrice);
+            return pnl.multiply(size).divide(riskPerUnit, 8, RoundingMode.HALF_UP);
+        }
+
+        private BigDecimal remainingSize() {
+            BigDecimal remaining = ZERO;
+            for (PositionLot lot : openLots) {
+                remaining = remaining.add(lot.size);
+            }
+            return remaining;
+        }
+
+        private String decorateReason(String exitReason) {
+            return exitReason + " | scaleOut=" + scaleOutTaken + " | addOns=" + addOnsUsed + " | finalStop=" + stopPrice;
+        }
+
+        private boolean isTrendContinuationSignal() {
+            return signalType.startsWith("CONFIRMED_BREAKOUT")
+                    || signalType.startsWith("BREAKOUT_PULLBACK")
+                    || signalType.startsWith("SECOND_ENTRY");
+        }
+
+        private static BigDecimal directionalPrice(BigDecimal entryPrice, BigDecimal distance, TradeDirection direction) {
+            return direction == TradeDirection.LONG
+                    ? entryPrice.add(distance)
+                    : entryPrice.subtract(distance);
+        }
+
+        private static BigDecimal clampFraction(BigDecimal value) {
+            if (value == null || value.compareTo(ZERO) <= 0) {
+                return ZERO;
+            }
+            if (value.compareTo(BigDecimal.ONE) > 0) {
+                return BigDecimal.ONE;
+            }
+            return value;
+        }
+    }
+
+    private static final class PositionLot {
+        private final BigDecimal entryPrice;
+        private BigDecimal size;
+
+        private PositionLot(BigDecimal entryPrice, BigDecimal size) {
+            this.entryPrice = entryPrice;
+            this.size = size;
+        }
+    }
+
     private static final class SignalAudit {
         private int rawSignalCount;
         private int blockedSignalCount;

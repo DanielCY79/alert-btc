@@ -73,6 +73,11 @@ class PriceFeatureExtractorTests {
         ReflectionTestUtils.setField(extractor, "pullbackTouchTolerance", new BigDecimal("0.008"));
         ReflectionTestUtils.setField(extractor, "pullbackHoldBuffer", new BigDecimal("0.006"));
         ReflectionTestUtils.setField(extractor, "pullbackMaxVolumeRatio", new BigDecimal("1.10"));
+        ReflectionTestUtils.setField(extractor, "secondEntryLookback", 8);
+        ReflectionTestUtils.setField(extractor, "secondEntryMinPullbackBars", 2);
+        ReflectionTestUtils.setField(extractor, "secondEntryMinBodyRatio", new BigDecimal("0.20"));
+        ReflectionTestUtils.setField(extractor, "secondEntryMinCloseLocation", new BigDecimal("0.55"));
+        ReflectionTestUtils.setField(extractor, "secondEntryInvalidationBuffer", new BigDecimal("0.001"));
         ReflectionTestUtils.setField(extractor, "volumeLookback", 3);
         ReflectionTestUtils.setField(extractor, "atrPeriod", 3);
     }

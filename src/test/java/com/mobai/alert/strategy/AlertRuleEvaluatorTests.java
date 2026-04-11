@@ -46,6 +46,15 @@ class AlertRuleEvaluatorTests {
         ReflectionTestUtils.setField(evaluator, "pullbackTouchTolerance", new BigDecimal("0.008"));
         ReflectionTestUtils.setField(evaluator, "pullbackHoldBuffer", new BigDecimal("0.006"));
         ReflectionTestUtils.setField(evaluator, "pullbackMaxVolumeRatio", new BigDecimal("1.10"));
+        ReflectionTestUtils.setField(evaluator, "breakoutFollowThroughCloseBuffer", new BigDecimal("0.001"));
+        ReflectionTestUtils.setField(evaluator, "breakoutFollowThroughMinBodyRatio", new BigDecimal("0.25"));
+        ReflectionTestUtils.setField(evaluator, "breakoutFollowThroughMinCloseLocation", new BigDecimal("0.55"));
+        ReflectionTestUtils.setField(evaluator, "breakoutFollowThroughMinVolumeRatio", new BigDecimal("0.80"));
+        ReflectionTestUtils.setField(evaluator, "secondEntryLookback", 12);
+        ReflectionTestUtils.setField(evaluator, "secondEntryMinPullbackBars", 2);
+        ReflectionTestUtils.setField(evaluator, "secondEntryMinBodyRatio", new BigDecimal("0.20"));
+        ReflectionTestUtils.setField(evaluator, "secondEntryMinCloseLocation", new BigDecimal("0.55"));
+        ReflectionTestUtils.setField(evaluator, "secondEntryInvalidationBuffer", new BigDecimal("0.001"));
     }
 
     /**
@@ -97,6 +106,29 @@ class AlertRuleEvaluatorTests {
     }
 
     /**
+     * 强势突破后还需要 follow-through 继续站稳，才应升级为成熟突破背景。
+     */
+    @Test
+    void shouldConfirmBreakoutOnlyAfterFollowThroughBarAppears() {
+        List<BinanceKlineDTO> klines = baseRangeScenario();
+        klines.add(kline(109.40, 111.20, 108.90, 110.80, "180.0", 67));
+        klines.add(kline(110.70, 111.60, 110.40, 111.30, "95.0", 68));
+        klines.add(kline(111.10, 111.20, 111.00, 111.05, "60.0", 69));
+
+        AlertSignal signal = evaluator.evaluateBreakoutFollowThrough(
+                klines,
+                new BigDecimal("109.00"),
+                new BigDecimal("108.13"),
+                new BigDecimal("118.00"),
+                true
+        ).orElse(null);
+
+        assertThat(signal).isNotNull();
+        assertThat(signal.getType()).isEqualTo("CONFIRMED_BREAKOUT_LONG");
+        assertThat(signal.getInvalidationPrice()).isEqualByComparingTo("108.13");
+    }
+
+    /**
      * 突破成立后的缩量回踩，应触发回踩接力信号。
      */
     @Test
@@ -111,6 +143,68 @@ class AlertRuleEvaluatorTests {
         assertThat(signal).isNotNull();
         assertThat(signal.getType()).isEqualTo("BREAKOUT_PULLBACK_LONG");
         assertThat(signal.getInvalidationPrice()).isEqualByComparingTo("108.35");
+    }
+
+    @Test
+    void shouldTriggerH1SecondEntryLongInBullTrend() {
+        List<BinanceKlineDTO> klines = baseBullTrendScenario();
+        klines.add(kline(132.60, 133.00, 131.80, 132.00, "88.0", 67));
+        klines.add(kline(132.10, 132.40, 131.20, 131.60, "84.0", 68));
+        klines.add(kline(131.70, 132.80, 131.40, 132.60, "92.0", 69));
+        klines.add(kline(132.50, 132.70, 132.20, 132.40, "60.0", 70));
+
+        AlertSignal signal = evaluator.evaluateSecondEntryLong(klines, null, null).orElse(null);
+
+        assertThat(signal).isNotNull();
+        assertThat(signal.getType()).isEqualTo("SECOND_ENTRY_H1_LONG");
+        assertThat(signal.getTriggerPrice()).isEqualByComparingTo("132.80");
+    }
+
+    @Test
+    void shouldTriggerH2SecondEntryLongAfterFirstAttemptFails() {
+        List<BinanceKlineDTO> klines = baseBullTrendScenario();
+        klines.add(kline(132.60, 133.00, 131.80, 132.00, "88.0", 67));
+        klines.add(kline(132.10, 133.05, 131.90, 132.70, "94.0", 68));
+        klines.add(kline(132.40, 132.50, 131.20, 131.50, "96.0", 69));
+        klines.add(kline(131.60, 132.80, 131.30, 132.50, "102.0", 70));
+        klines.add(kline(132.40, 132.60, 132.10, 132.30, "60.0", 71));
+
+        AlertSignal signal = evaluator.evaluateSecondEntryLong(klines, null, null).orElse(null);
+
+        assertThat(signal).isNotNull();
+        assertThat(signal.getType()).isEqualTo("SECOND_ENTRY_H2_LONG");
+        assertThat(signal.getTriggerPrice()).isEqualByComparingTo("132.80");
+    }
+
+    @Test
+    void shouldTriggerL1SecondEntryShortInBearTrend() {
+        List<BinanceKlineDTO> klines = baseBearTrendScenario();
+        klines.add(kline(167.10, 167.90, 166.90, 167.50, "88.0", 67));
+        klines.add(kline(167.40, 168.20, 167.10, 167.90, "84.0", 68));
+        klines.add(kline(167.80, 168.00, 166.70, 166.90, "92.0", 69));
+        klines.add(kline(166.80, 167.10, 166.60, 166.90, "60.0", 70));
+
+        AlertSignal signal = evaluator.evaluateSecondEntryShort(klines, null, null).orElse(null);
+
+        assertThat(signal).isNotNull();
+        assertThat(signal.getType()).isEqualTo("SECOND_ENTRY_L1_SHORT");
+        assertThat(signal.getTriggerPrice()).isEqualByComparingTo("166.70");
+    }
+
+    @Test
+    void shouldTriggerL2SecondEntryShortAfterFirstAttemptFails() {
+        List<BinanceKlineDTO> klines = baseBearTrendScenario();
+        klines.add(kline(167.10, 167.90, 167.20, 167.50, "88.0", 67));
+        klines.add(kline(167.40, 168.00, 167.05, 167.10, "94.0", 68));
+        klines.add(kline(167.20, 168.30, 167.15, 167.90, "96.0", 69));
+        klines.add(kline(167.80, 168.00, 166.95, 167.00, "102.0", 70));
+        klines.add(kline(166.80, 167.00, 166.50, 166.70, "60.0", 71));
+
+        AlertSignal signal = evaluator.evaluateSecondEntryShort(klines, null, null).orElse(null);
+
+        assertThat(signal).isNotNull();
+        assertThat(signal.getType()).isEqualTo("SECOND_ENTRY_L2_SHORT");
+        assertThat(signal.getTriggerPrice()).isEqualByComparingTo("166.95");
     }
 
     /**
@@ -130,6 +224,32 @@ class AlertRuleEvaluatorTests {
             double high = close + 1.00;
             double low = close - 1.00;
             klines.add(kline(open, high, low, close, "100.0", i + 1L));
+        }
+        return klines;
+    }
+
+    private List<BinanceKlineDTO> baseBullTrendScenario() {
+        List<BinanceKlineDTO> klines = new ArrayList<>();
+        double close = 100.0;
+        for (int i = 0; i < 66; i++) {
+            double open = close - 0.40;
+            double high = close + 0.60;
+            double low = close - 1.00;
+            klines.add(kline(open, high, low, close, "100.0", i + 1L));
+            close += 0.50;
+        }
+        return klines;
+    }
+
+    private List<BinanceKlineDTO> baseBearTrendScenario() {
+        List<BinanceKlineDTO> klines = new ArrayList<>();
+        double close = 200.0;
+        for (int i = 0; i < 66; i++) {
+            double open = close + 0.40;
+            double high = close + 1.00;
+            double low = close - 0.60;
+            klines.add(kline(open, high, low, close, "100.0", i + 1L));
+            close -= 0.50;
         }
         return klines;
     }

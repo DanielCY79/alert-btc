@@ -89,6 +89,33 @@ public class PriceFeatureExtractor {
     @Value("${monitoring.strategy.pullback.max-volume-ratio:1.10}")
     private BigDecimal pullbackMaxVolumeRatio;
 
+    @Value("${monitoring.strategy.breakout.follow-through.close-buffer:0.001}")
+    private BigDecimal breakoutFollowThroughCloseBuffer;
+
+    @Value("${monitoring.strategy.breakout.follow-through.min-body-ratio:0.25}")
+    private BigDecimal breakoutFollowThroughMinBodyRatio;
+
+    @Value("${monitoring.strategy.breakout.follow-through.min-close-location:0.55}")
+    private BigDecimal breakoutFollowThroughMinCloseLocation;
+
+    @Value("${monitoring.strategy.breakout.follow-through.min-volume-ratio:0.80}")
+    private BigDecimal breakoutFollowThroughMinVolumeRatio;
+
+    @Value("${monitoring.strategy.second-entry.lookback:12}")
+    private int secondEntryLookback = 12;
+
+    @Value("${monitoring.strategy.second-entry.min-pullback-bars:2}")
+    private int secondEntryMinPullbackBars = 2;
+
+    @Value("${monitoring.strategy.second-entry.min-body-ratio:0.20}")
+    private BigDecimal secondEntryMinBodyRatio = new BigDecimal("0.20");
+
+    @Value("${monitoring.strategy.second-entry.min-close-location:0.55}")
+    private BigDecimal secondEntryMinCloseLocation = new BigDecimal("0.55");
+
+    @Value("${monitoring.strategy.second-entry.invalidation-buffer:0.001}")
+    private BigDecimal secondEntryInvalidationBuffer = new BigDecimal("0.001");
+
     @Value("${monitoring.feature.price.volume-lookback:20}")
     private int volumeLookback;
 
@@ -170,7 +197,16 @@ public class PriceFeatureExtractor {
                 failureMinWickBodyRatio,
                 pullbackTouchTolerance,
                 pullbackHoldBuffer,
-                pullbackMaxVolumeRatio
+                pullbackMaxVolumeRatio,
+                breakoutFollowThroughCloseBuffer,
+                breakoutFollowThroughMinBodyRatio,
+                breakoutFollowThroughMinCloseLocation,
+                breakoutFollowThroughMinVolumeRatio,
+                secondEntryLookback,
+                secondEntryMinPullbackBars,
+                secondEntryMinBodyRatio,
+                secondEntryMinCloseLocation,
+                secondEntryInvalidationBuffer
         );
     }
 

@@ -21,7 +21,8 @@ public record TradeRecord(String signalType,
                           int maxHoldingBars,
                           Long exitTime,
                           BigDecimal exitPrice,
-                          String exitReason) {
+                          String exitReason,
+                          BigDecimal realizedROverride) {
 
     private static final BigDecimal ZERO = BigDecimal.ZERO;
 
@@ -38,11 +39,15 @@ public record TradeRecord(String signalType,
                        BigDecimal targetPrice,
                        BigDecimal riskPerUnit,
                        int maxHoldingBars) {
-        this(signalType, direction, signalTime, entryTime, entryBarIndex, entryPrice, stopPrice, targetPrice, riskPerUnit, maxHoldingBars, null, null, null);
+        this(signalType, direction, signalTime, entryTime, entryBarIndex, entryPrice, stopPrice, targetPrice, riskPerUnit, maxHoldingBars, null, null, null, null);
     }
 
     public TradeRecord close(long exitTime, BigDecimal exitPrice, String exitReason) {
-        return new TradeRecord(signalType, direction, signalTime, entryTime, entryBarIndex, entryPrice, stopPrice, targetPrice, riskPerUnit, maxHoldingBars, exitTime, exitPrice, exitReason);
+        return new TradeRecord(signalType, direction, signalTime, entryTime, entryBarIndex, entryPrice, stopPrice, targetPrice, riskPerUnit, maxHoldingBars, exitTime, exitPrice, exitReason, null);
+    }
+
+    public TradeRecord closeManaged(long exitTime, BigDecimal exitPrice, String exitReason, BigDecimal realizedR) {
+        return new TradeRecord(signalType, direction, signalTime, entryTime, entryBarIndex, entryPrice, stopPrice, targetPrice, riskPerUnit, maxHoldingBars, exitTime, exitPrice, exitReason, realizedR);
     }
 
     /**
@@ -56,6 +61,9 @@ public record TradeRecord(String signalType,
      * 按风险单位计算本笔交易的实现收益。
      */
     public BigDecimal realizedR() {
+        if (realizedROverride != null) {
+            return realizedROverride;
+        }
         if (exitPrice == null) {
             return ZERO;
         }
