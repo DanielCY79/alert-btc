@@ -8,8 +8,14 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
+/**
+ * Binance 衍生品 REST 客户端测试，校验新版接口路径解析是否正确。
+ */
 class BinanceDerivativeRestClientTests {
 
+    /**
+     * 应从当前 Binance taker 多空成交量接口解析返回结果。
+     */
     @Test
     void shouldFetchTakerBuySellVolumesFromCurrentBinancePath() {
         RestTemplate restTemplate = mock(RestTemplate.class);

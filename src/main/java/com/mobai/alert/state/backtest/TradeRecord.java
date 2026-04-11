@@ -5,6 +5,10 @@ import com.mobai.alert.state.signal.TradeDirection;
 import java.math.BigDecimal;
 import java.math.RoundingMode;
 
+/**
+ * 单笔回测交易记录。
+ * 从开仓信号、入场、止损止盈到退出原因都集中保存在这里。
+ */
 public record TradeRecord(String signalType,
                           TradeDirection direction,
                           long signalTime,
@@ -21,6 +25,9 @@ public record TradeRecord(String signalType,
 
     private static final BigDecimal ZERO = BigDecimal.ZERO;
 
+    /**
+     * 创建未平仓的交易记录。
+     */
     public TradeRecord(String signalType,
                        TradeDirection direction,
                        long signalTime,
@@ -38,10 +45,16 @@ public record TradeRecord(String signalType,
         return new TradeRecord(signalType, direction, signalTime, entryTime, entryBarIndex, entryPrice, stopPrice, targetPrice, riskPerUnit, maxHoldingBars, exitTime, exitPrice, exitReason);
     }
 
+    /**
+     * 在回测尾部强制平仓。
+     */
     public TradeRecord forceClose(long exitTime, BigDecimal exitPrice, String exitReason) {
         return close(exitTime, exitPrice, exitReason);
     }
 
+    /**
+     * 按风险单位计算本笔交易的实现收益。
+     */
     public BigDecimal realizedR() {
         if (exitPrice == null) {
             return ZERO;

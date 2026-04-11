@@ -3,7 +3,6 @@ package com.mobai.alert.access.kline.rest;
 import com.alibaba.fastjson.JSON;
 import com.alibaba.fastjson.JSONArray;
 import com.mobai.alert.access.kline.dto.BinanceKlineDTO;
-import com.mobai.alert.access.kline.dto.BinanceSymbolsDTO;
 import com.mobai.alert.access.kline.support.BinanceKlineMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -30,7 +29,6 @@ public class BinanceKlineRestClient {
     private static final String FUTURES_BASE_URL = "https://fapi.binance.com";
     private static final String PRICE_URL = "https://api.binance.com/api/v3/ticker/price";
     private static final String KLINE_URL = FUTURES_BASE_URL + "/fapi/v1/klines";
-    private static final String SYMBOLS_URL = FUTURES_BASE_URL + "/fapi/v1/exchangeInfo";
 
     private final RestTemplate restTemplate;
 
@@ -110,26 +108,5 @@ public class BinanceKlineRestClient {
         }
 
         return klines;
-    }
-
-    /**
-     * 拉取 Binance 可用交易对列表。
-     *
-     * @return 交易对列表 DTO；失败时返回空对象
-     */
-    public BinanceSymbolsDTO listSymbols() {
-        HttpHeaders headers = new HttpHeaders();
-        headers.set("X-MBX-APIKEY", apiKey);
-        HttpEntity<String> entity = new HttpEntity<>(headers);
-        try {
-            ResponseEntity<String> response = restTemplate.exchange(SYMBOLS_URL, HttpMethod.GET, entity, String.class);
-            BinanceSymbolsDTO symbolsDTO = JSON.parseObject(response.getBody(), BinanceSymbolsDTO.class);
-            int symbolCount = symbolsDTO == null || symbolsDTO.getSymbols() == null ? 0 : symbolsDTO.getSymbols().size();
-            log.info("Binance 交易对信息拉取完成，共 {} 个交易对", symbolCount);
-            return symbolsDTO;
-        } catch (Exception e) {
-            log.error("拉取 Binance 交易对信息失败", e);
-            return new BinanceSymbolsDTO();
-        }
     }
 }

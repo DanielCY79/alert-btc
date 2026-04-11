@@ -13,9 +13,9 @@ import java.util.List;
 import java.util.Optional;
 
 /**
- * 区间失败突破策略。
+ * 区间失败策略。
  *
- * <p>核心思路是识别价格短暂突破区间边界后重新回到区间内部的反转机会。</p>
+ * <p>核心思路是识别价格短暂跌破或上破区间边界后，又快速收回区间内部的反转机会。</p>
  */
 public class RangeFailureStrategyEvaluator {
 
@@ -41,7 +41,7 @@ public class RangeFailureStrategyEvaluator {
         BigDecimal close = StrategySupport.valueOf(latest.getClose());
         BigDecimal support = range.support();
 
-        // 先真的刺破下沿，再要求收回区间内部。
+        // 先真正跌破下沿，再要求收回区间内部。
         if (low.compareTo(support.multiply(StrategySupport.ONE.subtract(settings.failureProbeBuffer()))) > 0) {
             return Optional.empty();
         }
@@ -67,7 +67,7 @@ public class RangeFailureStrategyEvaluator {
                 "BTC 区间假跌破做多信号",
                 latest,
                 RANGE_FAILURE_LONG_TYPE,
-                "价格短暂跌破区间下沿后快速收回，形成假跌破反转做多信号。",
+                "价格短暂跌破区间下沿后迅速收回，形成区间假跌破反转做多。",
                 support.setScale(2, RoundingMode.HALF_UP),
                 invalidationPrice.setScale(2, RoundingMode.HALF_UP),
                 range.midpoint().setScale(2, RoundingMode.HALF_UP),
@@ -117,7 +117,7 @@ public class RangeFailureStrategyEvaluator {
                 "BTC 区间假突破做空信号",
                 latest,
                 RANGE_FAILURE_SHORT_TYPE,
-                "价格短暂突破区间上沿后重新回落，形成假突破反转做空信号。",
+                "价格短暂突破区间上沿后重新回落，形成区间假突破反转做空。",
                 resistance.setScale(2, RoundingMode.HALF_UP),
                 invalidationPrice.setScale(2, RoundingMode.HALF_UP),
                 range.midpoint().setScale(2, RoundingMode.HALF_UP),

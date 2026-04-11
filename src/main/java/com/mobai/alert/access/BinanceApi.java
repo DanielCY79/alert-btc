@@ -10,7 +10,6 @@ import com.mobai.alert.access.capitalflow.rest.BinanceDerivativeRestClient;
 import com.mobai.alert.access.capitalflow.service.BinanceDerivativeFeatureService;
 import com.mobai.alert.access.capitalflow.stream.BinanceForceOrderWebSocketService;
 import com.mobai.alert.access.kline.dto.BinanceKlineDTO;
-import com.mobai.alert.access.kline.dto.BinanceSymbolsDTO;
 import com.mobai.alert.access.kline.rest.BinanceKlineRestClient;
 import com.mobai.alert.access.kline.stream.BinanceKlineWebSocketService;
 import org.slf4j.Logger;
@@ -76,15 +75,6 @@ public class BinanceApi {
             }
         }
         return klineRestClient.listKline(reqDTO);
-    }
-
-    /**
-     * 获取 Binance 交易对列表。
-     *
-     * @return 交易对列表 DTO
-     */
-    public BinanceSymbolsDTO listSymbols() {
-        return klineRestClient.listSymbols();
     }
 
     /**

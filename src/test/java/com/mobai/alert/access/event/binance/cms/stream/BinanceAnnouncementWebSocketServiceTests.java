@@ -19,8 +19,14 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+/**
+ * Binance 公告 WebSocket 服务测试，验证连接前的时间同步与签名参数构造。
+ */
 class BinanceAnnouncementWebSocketServiceTests {
 
+    /**
+     * 建连前应先读取 Binance 服务端时间，并将其用于签名请求。
+     */
     @Test
     void shouldSyncServerTimeBeforeConnecting() {
         OkHttpClient okHttpClient = mock(OkHttpClient.class);
@@ -57,6 +63,9 @@ class BinanceAnnouncementWebSocketServiceTests {
         assertTrue(Math.abs(timestamp - 1744287500123L) < 250L, "timestamp should be close to Binance server time");
     }
 
+    /**
+     * 从请求查询串中提取指定参数，便于断言签名输入。
+     */
     private long extractQueryValue(Request request, String key) {
         String query = request.url().query();
         for (String part : query.split("&")) {

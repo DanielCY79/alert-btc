@@ -15,8 +15,14 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
+/**
+ * GDELT 文档 REST 客户端测试，覆盖新闻结果解析与异常兜底逻辑。
+ */
 class GdeltDocRestClientTests {
 
+    /**
+     * 正常响应时，应将 JSON 文章列表解析为领域对象。
+     */
     @Test
     void shouldParseArticlesFromJsonResponse() {
         RestTemplate restTemplate = mock(RestTemplate.class);
@@ -49,6 +55,9 @@ class GdeltDocRestClientTests {
         assertEquals(Instant.parse("2026-04-10T15:30:00Z"), articles.get(0).getEventTime());
     }
 
+    /**
+     * 远端抓取失败时，应返回空列表避免轮询中断。
+     */
     @Test
     void shouldReturnEmptyWhenFetchFails() {
         RestTemplate restTemplate = mock(RestTemplate.class);

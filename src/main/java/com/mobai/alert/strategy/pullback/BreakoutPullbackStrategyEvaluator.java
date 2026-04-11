@@ -14,7 +14,7 @@ import java.util.Optional;
 /**
  * 突破回踩策略。
  *
- * <p>在确认突破后，不立即追价，而是等待价格回踩关键位再判断是否继续顺势。</p>
+ * <p>在确认突破后，不立即追价，而是等待价格回踩关键位，再判断是否继续顺势。</p>
  */
 public class BreakoutPullbackStrategyEvaluator {
 
@@ -22,7 +22,7 @@ public class BreakoutPullbackStrategyEvaluator {
     private static final String PULLBACK_SHORT_TYPE = "BREAKOUT_PULLBACK_SHORT";
 
     /**
-     * 评估突破后的回踩/回抽确认信号。
+     * 评估突破后的回踩或反抽确认信号。
      */
     public Optional<AlertSignal> evaluateBreakoutPullback(List<BinanceKlineDTO> klines,
                                                           BigDecimal breakoutLevel,
@@ -45,7 +45,7 @@ public class BreakoutPullbackStrategyEvaluator {
         );
         BigDecimal volumeRatio = StrategySupport.ratio(StrategySupport.volumeOf(latest), averageVolume);
 
-        // 回踩阶段如果成交量过大，往往说明抛压/承压过强，先不接。
+        // 回踩阶段如果成交量过大，往往说明抛压或承压过强，先不接。
         if (volumeRatio.compareTo(settings.pullbackMaxVolumeRatio()) > 0) {
             return Optional.empty();
         }
@@ -84,10 +84,10 @@ public class BreakoutPullbackStrategyEvaluator {
 
         return Optional.of(new AlertSignal(
                 TradeDirection.SHORT,
-                "BTC 跌破回抽做空信号",
+                "BTC 跌破反抽做空信号",
                 latest,
                 PULLBACK_SHORT_TYPE,
-                "价格回抽跌破位后受阻转弱，属于跌破后的回抽确认做空。",
+                "价格反抽跌破位后受阻转弱，属于跌破后的反抽确认做空。",
                 breakoutLevel.setScale(2, RoundingMode.HALF_UP),
                 holdCeiling.setScale(2, RoundingMode.HALF_UP),
                 StrategySupport.scaleOrNull(targetPrice),

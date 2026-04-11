@@ -14,6 +14,10 @@ import org.springframework.web.client.RestTemplate;
 import java.util.HashMap;
 import java.util.Map;
 
+/**
+ * 企业微信通知实现。
+ * 通过机器人 Webhook 发送 Markdown 形式的消息。
+ */
 @Component
 @ConditionalOnProperty(value = "notification.enterprise-wechat.enabled", havingValue = "true")
 public class EnterpriseWechatNotifier implements AlertNotifier {
@@ -29,11 +33,17 @@ public class EnterpriseWechatNotifier implements AlertNotifier {
         this.webhookUrl = webhookUrl;
     }
 
+    /**
+     * 返回企业微信通道标识。
+     */
     @Override
     public String channelName() {
         return "enterprise-wechat";
     }
 
+    /**
+     * 将通知消息封装为企业微信请求体并发送。
+     */
     @Override
     public void send(NotificationMessage message) {
         Map<String, Object> body = new HashMap<>();

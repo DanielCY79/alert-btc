@@ -7,8 +7,14 @@ import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
+/**
+ * Binance CMS 签名器测试，确保签名原文与摘要结果稳定可预期。
+ */
 class BinanceCmsSignerTests {
 
+    /**
+     * 载荷拼接应保持参数插入顺序，避免签名串发生偏移。
+     */
     @Test
     void shouldBuildPayloadInInsertionOrder() {
         BinanceCmsSigner signer = new BinanceCmsSigner();
@@ -22,6 +28,9 @@ class BinanceCmsSignerTests {
         assertEquals("random=1&topic=2&recvWindow=3&timestamp=4", payload);
     }
 
+    /**
+     * 已知输入下应生成固定签名，便于校验算法正确性。
+     */
     @Test
     void shouldGenerateExpectedSignature() {
         BinanceCmsSigner signer = new BinanceCmsSigner();

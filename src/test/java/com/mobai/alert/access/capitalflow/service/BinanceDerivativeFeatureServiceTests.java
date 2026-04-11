@@ -18,8 +18,14 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
+/**
+ * 衍生品特征服务测试，验证原始接口数据能正确汇总为统一特征快照。
+ */
 class BinanceDerivativeFeatureServiceTests {
 
+    /**
+     * 给定持仓、资金费率和强平聚类数据时，应生成完整衍生品特征。
+     */
     @Test
     void shouldBuildDerivativeFeaturesFromRawInputs() {
         BinanceDerivativeRestClient derivativeRestClient = mock(BinanceDerivativeRestClient.class);
@@ -78,12 +84,18 @@ class BinanceDerivativeFeatureServiceTests {
         assertEquals(new BigDecimal("250000.50"), features.getLiquidationClusterIntensity());
     }
 
+    /**
+     * 构造资金费率测试样本。
+     */
     private BinanceFundingRateDTO fundingRate(String value) {
         BinanceFundingRateDTO dto = new BinanceFundingRateDTO();
         dto.setFundingRate(value);
         return dto;
     }
 
+    /**
+     * 构造成交量不平衡测试样本。
+     */
     private BinanceTakerBuySellVolumeDTO takerVolume(String buyVol, String sellVol) {
         BinanceTakerBuySellVolumeDTO dto = new BinanceTakerBuySellVolumeDTO();
         dto.setBuyVol(buyVol);
@@ -91,6 +103,9 @@ class BinanceDerivativeFeatureServiceTests {
         return dto;
     }
 
+    /**
+     * 构造大户多空比测试样本。
+     */
     private BinanceTopTraderRatioDTO ratio(String longShortRatio) {
         BinanceTopTraderRatioDTO dto = new BinanceTopTraderRatioDTO();
         dto.setLongShortRatio(longShortRatio);

@@ -13,10 +13,9 @@ import java.util.List;
 import java.util.Optional;
 
 /**
- * 已确认突破策略。
+ * 确认突破策略。
  *
- * <p>这类信号要求价格、K 线形态和成交量同时确认，
- * 目的是尽量过滤掉刚碰到边界就回来的假突破。</p>
+ * <p>这类信号要求价格、K线形态和成交量同时确认，尽量过滤掉刚碰边界就回落的假突破。</p>
  */
 public class ConfirmedBreakoutStrategyEvaluator {
 
@@ -59,7 +58,7 @@ public class ConfirmedBreakoutStrategyEvaluator {
                 ? boundary.multiply(StrategySupport.ONE.add(settings.breakoutCloseBuffer()))
                 : boundary.multiply(StrategySupport.ONE.subtract(settings.breakoutCloseBuffer()));
 
-        // 最新收盘价必须真正站上/跌破边界缓冲。
+        // 最新收盘必须真正站上或跌破边界缓冲。
         if (bullishBreakout && close.compareTo(closeThreshold) <= 0) {
             return Optional.empty();
         }
@@ -67,7 +66,7 @@ public class ConfirmedBreakoutStrategyEvaluator {
             return Optional.empty();
         }
 
-        // 前一根 K 线仍在区间内，避免连续多根都在边界外的追价信号。
+        // 前一根K线仍应在区间内，避免连续多根都在边界外的追价信号。
         if (bullishBreakout && previousClose.compareTo(closeThreshold) > 0) {
             return Optional.empty();
         }
@@ -100,7 +99,7 @@ public class ConfirmedBreakoutStrategyEvaluator {
             return Optional.empty();
         }
 
-        // 避免离边界过远的过度延伸追涨/追空。
+        // 避免离边界过远的过度延伸追涨或追空。
         BigDecimal extensionCap = bullishBreakout
                 ? boundary.multiply(StrategySupport.ONE.add(settings.breakoutMaxExtension()))
                 : boundary.multiply(StrategySupport.ONE.subtract(settings.breakoutMaxExtension()));

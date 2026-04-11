@@ -15,8 +15,14 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+/**
+ * 通知服务测试，校验市场事件消息会发送到选定渠道。
+ */
 class AlertNotificationServiceTests {
 
+    /**
+     * 市场事件通知应包含标题与原始链接，方便快速追踪来源。
+     */
     @Test
     void shouldSendMarketEventMessageToSelectedChannel() {
         AlertNotifier notifier = mock(AlertNotifier.class);

@@ -11,6 +11,10 @@ import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.ConfigurableApplicationContext;
 import org.springframework.stereotype.Component;
 
+/**
+ * 回测模式下的应用启动执行器。
+ * 应用启动后立即运行默认回测批次，并在结束后主动退出。
+ */
 @Component
 @ConditionalOnProperty(value = "backtest.enabled", havingValue = "true")
 public class BacktestRunner implements ApplicationRunner {
@@ -26,11 +30,14 @@ public class BacktestRunner implements ApplicationRunner {
         this.applicationContext = applicationContext;
     }
 
+    /**
+     * 启动默认回测并打印结果。
+     */
     @Override
     public void run(ApplicationArguments args) {
-        log.info("回测任务开始执行");
+        log.info("Backtest job started");
         BatchBacktestResult result = strategyBacktestService.runDefaultBacktestBatch();
-        log.info("回测任务执行完成，结果如下：\n{}", strategyBacktestService.formatBatchResult(result));
+        log.info("Backtest job finished:\n{}", strategyBacktestService.formatBatchResult(result));
         SpringApplication.exit(applicationContext, () -> 0);
     }
 }

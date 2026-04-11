@@ -12,10 +12,16 @@ import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+/**
+ * 策略规则评估器测试，覆盖区间假突破、确认突破与回踩场景。
+ */
 class AlertRuleEvaluatorTests {
 
     private AlertRuleEvaluator evaluator;
 
+    /**
+     * 初始化评估器参数，使测试场景与生产规则保持一致。
+     */
     @BeforeEach
     void setUp() {
         evaluator = new AlertRuleEvaluator();
@@ -42,6 +48,9 @@ class AlertRuleEvaluatorTests {
         ReflectionTestUtils.setField(evaluator, "pullbackMaxVolumeRatio", new BigDecimal("1.10"));
     }
 
+    /**
+     * 跌破支撑后快速收回区间时，应识别为假跌破做多信号。
+     */
     @Test
     void shouldTriggerFailedBreakdownLongAtRangeSupport() {
         List<BinanceKlineDTO> klines = baseRangeScenario();
@@ -55,6 +64,9 @@ class AlertRuleEvaluatorTests {
         assertThat(signal.getTriggerPrice()).isEqualByComparingTo("100.00");
     }
 
+    /**
+     * 上破阻力后重新跌回区间时，应识别为假突破做空信号。
+     */
     @Test
     void shouldTriggerFailedBreakoutShortAtRangeResistance() {
         List<BinanceKlineDTO> klines = baseRangeScenario();
@@ -68,6 +80,9 @@ class AlertRuleEvaluatorTests {
         assertThat(signal.getTriggerPrice()).isEqualByComparingTo("109.00");
     }
 
+    /**
+     * 突破区间并完成确认时，应给出趋势突破做多信号。
+     */
     @Test
     void shouldTriggerConfirmedBullishBreakoutWhenRangeIsAccepted() {
         List<BinanceKlineDTO> klines = baseRangeScenario();
@@ -81,6 +96,9 @@ class AlertRuleEvaluatorTests {
         assertThat(signal.getTriggerPrice()).isEqualByComparingTo("109.00");
     }
 
+    /**
+     * 突破成立后的缩量回踩，应触发回踩接力信号。
+     */
     @Test
     void shouldTriggerBullishPullbackAfterAcceptedBreakout() {
         List<BinanceKlineDTO> klines = baseRangeScenario();
@@ -95,6 +113,9 @@ class AlertRuleEvaluatorTests {
         assertThat(signal.getInvalidationPrice()).isEqualByComparingTo("108.35");
     }
 
+    /**
+     * 生成基础区间盘整行情，用于覆盖不同衍生场景。
+     */
     private List<BinanceKlineDTO> baseRangeScenario() {
         List<BinanceKlineDTO> klines = new ArrayList<>();
         double[] closes = {
@@ -113,6 +134,9 @@ class AlertRuleEvaluatorTests {
         return klines;
     }
 
+    /**
+     * 构造单根测试 K 线数据。
+     */
     private BinanceKlineDTO kline(double open,
                                   double high,
                                   double low,

@@ -14,6 +14,10 @@ import org.springframework.web.client.RestTemplate;
 import java.util.HashMap;
 import java.util.Map;
 
+/**
+ * 飞书通知实现。
+ * 当前使用简单文本消息格式推送交易提醒。
+ */
 @Component
 @ConditionalOnProperty(value = "notification.feishu.enabled", havingValue = "true")
 public class FeishuNotifier implements AlertNotifier {
@@ -29,11 +33,17 @@ public class FeishuNotifier implements AlertNotifier {
         this.webhookUrl = webhookUrl;
     }
 
+    /**
+     * 返回飞书通道标识。
+     */
     @Override
     public String channelName() {
         return "feishu";
     }
 
+    /**
+     * 将通知消息转换为飞书文本请求并发送。
+     */
     @Override
     public void send(NotificationMessage message) {
         Map<String, Object> body = new HashMap<>();

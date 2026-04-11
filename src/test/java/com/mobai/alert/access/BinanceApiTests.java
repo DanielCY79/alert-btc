@@ -17,8 +17,14 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+/**
+ * BinanceApi 访问层测试，覆盖 K 线查询的缓存回退行为。
+ */
 class BinanceApiTests {
 
+    /**
+     * 当 WebSocket 缓存命中时，应优先直接返回缓存数据。
+     */
     @Test
     void shouldPreferWebSocketCacheForRecentKlines() {
         BinanceKlineRestClient klineRestClient = mock(BinanceKlineRestClient.class);
@@ -46,6 +52,9 @@ class BinanceApiTests {
         verify(webSocketService).getRecentKlines(request);
     }
 
+    /**
+     * 当 WebSocket 已连接但缓存未命中时，应回退到 REST 拉取数据。
+     */
     @Test
     void shouldFallbackToRestWhenWebSocketCacheMisses() {
         BinanceKlineRestClient klineRestClient = mock(BinanceKlineRestClient.class);
@@ -74,6 +83,9 @@ class BinanceApiTests {
         verify(klineRestClient).listKline(request);
     }
 
+    /**
+     * 当 WebSocket 服务不可用时，应直接走 REST 查询。
+     */
     @Test
     void shouldFallbackToRestWhenWebSocketServiceIsUnavailable() {
         BinanceKlineRestClient klineRestClient = mock(BinanceKlineRestClient.class);
@@ -100,4 +112,3 @@ class BinanceApiTests {
         verify(klineRestClient).listKline(request);
     }
 }
-

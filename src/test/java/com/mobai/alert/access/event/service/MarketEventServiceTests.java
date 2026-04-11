@@ -10,8 +10,14 @@ import java.time.Instant;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 
+/**
+ * 市场事件归一化测试，覆盖公告与社交事件到统一事件模型的映射。
+ */
 class MarketEventServiceTests {
 
+    /**
+     * Binance 公告应被规范化为结构化市场事件。
+     */
     @Test
     void shouldNormalizeBinanceAnnouncementIntoEvent() {
         MarketEventService service = new MarketEventService();
@@ -29,6 +35,9 @@ class MarketEventServiceTests {
         assertEquals("bullish", event.getSentiment());
     }
 
+    /**
+     * 社交文本事件应提取实体、类型与情绪方向。
+     */
     @Test
     void shouldNormalizeSocialEventIntoEvent() {
         MarketEventService service = new MarketEventService();

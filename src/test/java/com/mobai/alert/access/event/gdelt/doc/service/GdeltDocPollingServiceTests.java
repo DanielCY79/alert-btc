@@ -20,8 +20,14 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+/**
+ * GDELT 轮询服务测试，确认新闻入库、通知与去重行为符合预期。
+ */
 class GdeltDocPollingServiceTests {
 
+    /**
+     * 新文章进入系统后，应转换为事件并触发通知。
+     */
     @Test
     void shouldIngestAndNotifyNewArticles() {
         GdeltDocRestClient restClient = mock(GdeltDocRestClient.class);
@@ -60,6 +66,9 @@ class GdeltDocPollingServiceTests {
         assertEquals(0.7d, captor.getValue().getSourceQuality());
     }
 
+    /**
+     * 已处理过的文章不应重复入库，避免重复提醒。
+     */
     @Test
     void shouldSkipAlreadyProcessedArticles() {
         GdeltDocRestClient restClient = mock(GdeltDocRestClient.class);
