@@ -41,3 +41,6 @@ build/
 
 .codex_tmp_epub
 /.editorconfig
+
+.tmp_epub
+.tmp_epub_extract
