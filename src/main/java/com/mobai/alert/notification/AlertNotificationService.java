@@ -5,6 +5,7 @@ import com.mobai.alert.access.event.dto.MarketEventDTO;
 import com.mobai.alert.access.kline.dto.BinanceKlineDTO;
 import com.mobai.alert.notification.channel.AlertNotifier;
 import com.mobai.alert.notification.model.NotificationMessage;
+import com.mobai.alert.notification.model.NotificationMessage.HeaderTemplate;
 import com.mobai.alert.state.signal.AlertSignal;
 import com.mobai.alert.state.signal.TradeDirection;
 import org.slf4j.Logger;
@@ -164,7 +165,12 @@ public class AlertNotificationService {
                 .append("图表: ").append(chartUrl)
                 .toString();
 
-        return new NotificationMessage(markdownContent, plainTextContent);
+        return new NotificationMessage(
+                markdownContent,
+                plainTextContent,
+                signalCardTitle(symbol, signal, false),
+                headerTemplate(signal)
+        );
     }
 
     private NotificationMessage buildExitSignalMessage(AlertSignal signal) {
@@ -224,7 +230,12 @@ public class AlertNotificationService {
                 .append("图表: ").append(chartUrl)
                 .toString();
 
-        return new NotificationMessage(markdownContent, plainTextContent);
+        return new NotificationMessage(
+                markdownContent,
+                plainTextContent,
+                signalCardTitle(symbol, signal, true),
+                headerTemplate(signal)
+        );
     }
 
     private NotificationMessage buildRuntimeExitSignalMessage(AlertSignal signal) {
@@ -288,7 +299,12 @@ public class AlertNotificationService {
                 .append("图表: ").append(chartUrl)
                 .toString();
 
-        return new NotificationMessage(markdownContent, plainTextContent);
+        return new NotificationMessage(
+                markdownContent,
+                plainTextContent,
+                signalCardTitle(symbol, signal, true),
+                headerTemplate(signal)
+        );
     }
 
     private NotificationMessage buildAnnouncementMessage(BinanceAnnouncementDTO announcement) {
@@ -330,7 +346,12 @@ public class AlertNotificationService {
         }
         plainTextBuilder.append("打开公告: ").append(url);
 
-        return new NotificationMessage(markdownBuilder.toString(), plainTextBuilder.toString());
+        return new NotificationMessage(
+                markdownBuilder.toString(),
+                plainTextBuilder.toString(),
+                "Binance 公告",
+                HeaderTemplate.BLUE
+        );
     }
 
     private NotificationMessage buildMarketEventMessage(MarketEventDTO event, String title, String url) {
@@ -377,7 +398,12 @@ public class AlertNotificationService {
             plainTextBuilder.append("打开原文: ").append(url);
         }
 
-        return new NotificationMessage(markdownBuilder.toString(), plainTextBuilder.toString());
+        return new NotificationMessage(
+                markdownBuilder.toString(),
+                plainTextBuilder.toString(),
+                "市场事件",
+                HeaderTemplate.BLUE
+        );
     }
 
     private String directionLabel(TradeDirection direction) {
@@ -385,6 +411,20 @@ public class AlertNotificationService {
             return "观望";
         }
         return direction == TradeDirection.LONG ? "做多" : "做空";
+    }
+
+    private String signalCardTitle(String symbol, AlertSignal signal, boolean exitSignal) {
+        String normalizedSymbol = StringUtils.hasText(symbol) ? symbol : "交易提醒";
+        String direction = directionLabel(signal == null ? null : signal.getDirection());
+        String suffix = exitSignal ? "退出提醒" : "交易信号";
+        return normalizedSymbol + " " + suffix + " | " + direction;
+    }
+
+    private HeaderTemplate headerTemplate(AlertSignal signal) {
+        if (signal == null || signal.getDirection() == null) {
+            return HeaderTemplate.BLUE;
+        }
+        return signal.getDirection() == TradeDirection.LONG ? HeaderTemplate.GREEN : HeaderTemplate.RED;
     }
 
     private String setupLabel(AlertSignal signal) {
@@ -696,9 +736,14 @@ public class AlertNotificationService {
             return message;
         }
         String header = "[" + profileLabel.trim() + "]\n";
+        String nextCardTitle = StringUtils.hasText(message.cardTitle())
+                ? "[" + profileLabel.trim() + "] " + message.cardTitle()
+                : "[" + profileLabel.trim() + "] 通知提醒";
         return new NotificationMessage(
                 header + defaultText(message.markdownContent(), ""),
-                header + defaultText(message.plainTextContent(), "")
+                header + defaultText(message.plainTextContent(), ""),
+                nextCardTitle,
+                message.headerTemplate()
         );
     }
 

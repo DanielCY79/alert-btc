@@ -40,11 +40,41 @@ class AlertNotificationSignalContextTests {
 
         service.send(signal);
 
-        String plainText = captureMessage(notifier).plainTextContent();
+        NotificationMessage message = captureMessage(notifier);
+        String plainText = message.plainTextContent();
         assertThat(plainText).contains("BTCUSDT");
         assertThat(plainText).contains("confirmed breakout long");
+        assertThat(message.cardTitle()).contains("BTCUSDT");
+        assertThat(message.headerTemplate()).isEqualTo(NotificationMessage.HeaderTemplate.GREEN);
         assertThat(plainText).contains("挂单方案");
         assertThat(plainText).contains("风控提示");
+    }
+
+    @Test
+    void shouldUseRedCardHeaderForShortSignal() {
+        AlertNotifier notifier = notifier();
+        AlertNotificationService service = service(notifier);
+
+        AlertSignal signal = new AlertSignal(
+                TradeDirection.SHORT,
+                "BTC confirmed breakout short",
+                kline("110.00", "111.00", "101.00", "102.00", "120000"),
+                "CONFIRMED_BREAKOUT_SHORT",
+                "price accepted below the range",
+                new BigDecimal("101.50"),
+                new BigDecimal("105.00"),
+                new BigDecimal("94.00"),
+                new BigDecimal("2.10"),
+                new BigDecimal("0.78"),
+                "trendBias=-0.75"
+        );
+
+        service.send(signal);
+
+        NotificationMessage message = captureMessage(notifier);
+        assertThat(message.plainTextContent()).contains("confirmed breakout short");
+        assertThat(message.cardTitle()).contains("BTCUSDT");
+        assertThat(message.headerTemplate()).isEqualTo(NotificationMessage.HeaderTemplate.RED);
     }
 
     @Test
