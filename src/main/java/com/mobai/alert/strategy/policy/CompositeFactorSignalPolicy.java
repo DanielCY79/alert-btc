@@ -108,6 +108,18 @@ public class CompositeFactorSignalPolicy {
     @Value("${monitoring.feature.policy.weights.pullback.regime-risk:0.18}")
     private BigDecimal pullbackRegimeRiskWeight;
 
+    @Value("${monitoring.multi-timeframe.role:single-timeframe}")
+    private String multiTimeframeRole = "single-timeframe";
+
+    @Value("${monitoring.multi-timeframe.conflict-policy:context-first}")
+    private String multiTimeframeConflictPolicy = "context-first";
+
+    @Value("${monitoring.multi-timeframe.allow-countertrend-entry:false}")
+    private boolean allowCountertrendEntry;
+
+    @Value("${monitoring.multi-timeframe.execution.require-context:false}")
+    private boolean requireExecutionContext;
+
     public CompositeFactorPolicyProfile currentProfile() {
         return new CompositeFactorPolicyProfile(
                 enabled,
@@ -167,6 +179,13 @@ public class CompositeFactorSignalPolicy {
                 String contextComment = buildContextComment(null, reasons);
                 return new SignalPolicyDecision(false, signal.withContext(null, contextComment), null, List.copyOf(reasons));
             }
+        }
+
+        ContextAlignmentDecision contextDecision = evaluateHigherTimeframeContext(signal, snapshot);
+        reasons.addAll(contextDecision.reasons());
+        if (!contextDecision.allowed()) {
+            String contextComment = buildContextComment(null, reasons);
+            return new SignalPolicyDecision(false, signal.withContext(null, contextComment), null, List.copyOf(reasons));
         }
 
         if (profile == null || !profile.enabled() || snapshot == null || snapshot.getCompositeFactors() == null) {
@@ -320,6 +339,101 @@ public class CompositeFactorSignalPolicy {
         return "该信号";
     }
 
+    private ContextAlignmentDecision evaluateHigherTimeframeContext(AlertSignal signal, FeatureSnapshot snapshot) {
+        if (!isExecutionRole() || !isContextFirstPolicy()) {
+            return ContextAlignmentDecision.allowed(List.of());
+        }
+
+        FeatureSnapshot contextSnapshot = snapshot == null ? null : snapshot.getContextSnapshot();
+        if (contextSnapshot == null) {
+            if (requireExecutionContext) {
+                return ContextAlignmentDecision.blocked(List.of("Block: missing higher-timeframe context"));
+            }
+            return ContextAlignmentDecision.allowed(List.of());
+        }
+
+        List<String> reasons = new ArrayList<>();
+        String interval = contextSnapshot.getInterval() == null ? "HTF" : contextSnapshot.getInterval();
+        MarketState contextState = contextSnapshot.getMarketState() == null ? MarketState.UNKNOWN : contextSnapshot.getMarketState();
+        reasons.add("HigherTF(" + interval + ")=" + contextState.label());
+
+        TradeDirection contextDirection = inferContextDirection(contextSnapshot);
+        if (contextDirection != null) {
+            reasons.add("HigherTF bias=" + contextDirection.name());
+        }
+
+        if (allowCountertrendEntry) {
+            return ContextAlignmentDecision.allowed(List.copyOf(reasons));
+        }
+        if (!isCompatibleWithHigherTimeframe(signal, contextState, contextDirection)) {
+            reasons.add(higherTimeframeMismatchReason(signal, interval, contextState, contextDirection));
+            return ContextAlignmentDecision.blocked(List.copyOf(reasons));
+        }
+        return ContextAlignmentDecision.allowed(List.copyOf(reasons));
+    }
+
+    private boolean isExecutionRole() {
+        return "execution".equalsIgnoreCase(multiTimeframeRole);
+    }
+
+    private boolean isContextFirstPolicy() {
+        return multiTimeframeConflictPolicy == null
+                || multiTimeframeConflictPolicy.isBlank()
+                || "context-first".equalsIgnoreCase(multiTimeframeConflictPolicy);
+    }
+
+    private boolean isCompatibleWithHigherTimeframe(AlertSignal signal,
+                                                    MarketState contextState,
+                                                    TradeDirection contextDirection) {
+        if (contextState == null || contextState == MarketState.UNKNOWN) {
+            return true;
+        }
+        if (contextState == MarketState.RANGE) {
+            return isRangeFailure(signal);
+        }
+        if (isRangeFailure(signal)) {
+            return false;
+        }
+        if (contextDirection == null || signal == null || signal.getDirection() == null) {
+            return true;
+        }
+        return signal.getDirection() == contextDirection;
+    }
+
+    private TradeDirection inferContextDirection(FeatureSnapshot contextSnapshot) {
+        if (contextSnapshot == null || contextSnapshot.getCompositeFactors() == null) {
+            return null;
+        }
+        CompositeFactors factors = contextSnapshot.getCompositeFactors();
+        BigDecimal dominantBias = dominantBias(factors.getTrendBiasScore(), factors.getBreakoutConfirmationScore());
+        if (dominantBias == null || dominantBias.compareTo(ZERO) == 0) {
+            return null;
+        }
+        return dominantBias.compareTo(ZERO) > 0 ? TradeDirection.LONG : TradeDirection.SHORT;
+    }
+
+    private BigDecimal dominantBias(BigDecimal primary, BigDecimal secondary) {
+        BigDecimal normalizedPrimary = primary == null ? ZERO : primary;
+        BigDecimal normalizedSecondary = secondary == null ? ZERO : secondary;
+        return normalizedPrimary.abs().compareTo(normalizedSecondary.abs()) >= 0
+                ? normalizedPrimary
+                : normalizedSecondary;
+    }
+
+    private String higherTimeframeMismatchReason(AlertSignal signal,
+                                                 String interval,
+                                                 MarketState contextState,
+                                                 TradeDirection contextDirection) {
+        if (contextState == MarketState.RANGE) {
+            return "Block: " + interval + " range context only accepts range-failure entries";
+        }
+        if (contextDirection == null) {
+            return "Block: " + interval + " context rejects " + signalFamilyLabel(signal);
+        }
+        return "Block: " + interval + " bias " + contextDirection.name()
+                + " rejects " + signal.getDirection() + " " + signalFamilyLabel(signal);
+    }
+
     private BigDecimal directed(AlertSignal signal, BigDecimal factor) {
         if (factor == null) {
             return null;
@@ -375,5 +489,16 @@ public class CompositeFactorSignalPolicy {
             return "-";
         }
         return value.setScale(2, RoundingMode.HALF_UP).toPlainString();
+    }
+
+    private record ContextAlignmentDecision(boolean allowed,
+                                            List<String> reasons) {
+        private static ContextAlignmentDecision allowed(List<String> reasons) {
+            return new ContextAlignmentDecision(true, reasons);
+        }
+
+        private static ContextAlignmentDecision blocked(List<String> reasons) {
+            return new ContextAlignmentDecision(false, reasons);
+        }
     }
 }

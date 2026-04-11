@@ -43,6 +43,7 @@ public class FeatureSnapshot {
      * 快照质量信息。
      */
     private FeatureQuality quality;
+    private FeatureSnapshot contextSnapshot;
     private MarketState marketState;
     private String marketStateComment;
 
@@ -116,6 +117,14 @@ public class FeatureSnapshot {
 
     public void setQuality(FeatureQuality quality) {
         this.quality = quality;
+    }
+
+    public FeatureSnapshot getContextSnapshot() {
+        return contextSnapshot;
+    }
+
+    public void setContextSnapshot(FeatureSnapshot contextSnapshot) {
+        this.contextSnapshot = contextSnapshot;
     }
 
     public MarketState getMarketState() {

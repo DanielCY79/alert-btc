@@ -35,6 +35,7 @@ public class MarketFeatureSnapshotService {
     private final EventFeatureExtractor eventFeatureExtractor;
     private final CompositeFactorCalculator compositeFactorCalculator;
     private final Map<String, FeatureSnapshot> latestSnapshots = new ConcurrentHashMap<>();
+    private final Map<String, FeatureSnapshot> latestSnapshotsByInterval = new ConcurrentHashMap<>();
 
     public MarketFeatureSnapshotService(BinanceApi binanceApi,
                                         MarketEventService marketEventService,
@@ -71,7 +72,7 @@ public class MarketFeatureSnapshotService {
         snapshot.setEventFeatures(eventFeatures);
         snapshot.setCompositeFactors(compositeFactors);
         snapshot.setQuality(buildQuality(klines, priceFeatures, derivativeFeatures, eventFeatures));
-        latestSnapshots.put(symbol, snapshot);
+        rememberLatestSnapshot(snapshot);
         return snapshot;
     }
 
@@ -80,6 +81,18 @@ public class MarketFeatureSnapshotService {
      */
     public FeatureSnapshot getLatestSnapshot(String symbol) {
         return latestSnapshots.get(symbol);
+    }
+
+    public FeatureSnapshot getLatestSnapshot(String symbol, String interval) {
+        return latestSnapshotsByInterval.get(snapshotKey(symbol, interval));
+    }
+
+    public void rememberLatestSnapshot(FeatureSnapshot snapshot) {
+        if (snapshot == null || snapshot.getSymbol() == null || snapshot.getInterval() == null) {
+            return;
+        }
+        latestSnapshots.put(snapshot.getSymbol(), snapshot);
+        latestSnapshotsByInterval.put(snapshotKey(snapshot.getSymbol(), snapshot.getInterval()), snapshot);
     }
 
     /**
@@ -119,5 +132,9 @@ public class MarketFeatureSnapshotService {
                 || derivativeFeatures.getTopTraderAccountRatioChange() != null
                 || derivativeFeatures.getTopTraderPositionRatioChange() != null
                 || derivativeFeatures.getLiquidationClusterIntensity() != null;
+    }
+
+    private String snapshotKey(String symbol, String interval) {
+        return symbol + "@" + interval;
     }
 }

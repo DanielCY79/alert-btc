@@ -29,6 +29,9 @@ public final class RuntimePosition {
     private boolean scaleOutTaken;
     private int addOnsUsed;
     private boolean pendingAddOn;
+    private boolean conflictReduced;
+    private boolean conflictStopTightened;
+    private boolean addOnsLocked;
     private BigDecimal highestHigh;
     private BigDecimal lowestLow;
     private long lastManagedBarEndTime;
@@ -140,6 +143,18 @@ public final class RuntimePosition {
         return pendingAddOn;
     }
 
+    public boolean conflictReduced() {
+        return conflictReduced;
+    }
+
+    public boolean conflictStopTightened() {
+        return conflictStopTightened;
+    }
+
+    public boolean addOnsLocked() {
+        return addOnsLocked;
+    }
+
     public long lastManagedBarEndTime() {
         return lastManagedBarEndTime;
     }
@@ -189,8 +204,63 @@ public final class RuntimePosition {
         return previousSize.subtract(remainingSize);
     }
 
+    public boolean canConflictReduce() {
+        return !conflictReduced
+                && remainingSize.compareTo(ZERO) > 0
+                && scaleOutFraction.compareTo(ZERO) > 0;
+    }
+
+    public BigDecimal applyConflictReduce() {
+        if (!canConflictReduce()) {
+            return ZERO;
+        }
+        lockAddOns();
+        BigDecimal previousSize = remainingSize;
+        BigDecimal sizeToClose = previousSize.multiply(scaleOutFraction);
+        BigDecimal remaining = previousSize.subtract(sizeToClose);
+        remainingSize = remaining.compareTo(ZERO) < 0 ? ZERO : remaining;
+        conflictReduced = true;
+        return previousSize.subtract(remainingSize);
+    }
+
+    public boolean canTightenConflictStop() {
+        return !conflictStopTightened
+                && remainingSize.compareTo(ZERO) > 0
+                && direction != null
+                && entryPrice != null
+                && stopPrice != null
+                && !hasProtectedStop();
+    }
+
+    public BigDecimal conflictTightenedStopPrice() {
+        if (direction == null || entryPrice == null || stopPrice == null) {
+            return stopPrice;
+        }
+        return direction == TradeDirection.LONG
+                ? stopPrice.max(entryPrice)
+                : stopPrice.min(entryPrice);
+    }
+
+    public boolean tightenStopForConflict() {
+        if (!canTightenConflictStop()) {
+            return false;
+        }
+        lockAddOns();
+        stopPrice = conflictTightenedStopPrice();
+        conflictStopTightened = true;
+        return true;
+    }
+
+    public void prepareForConflictExit() {
+        lockAddOns();
+    }
+
     public void activatePendingAddOn(BigDecimal openPrice) {
-        if (!pendingAddOn || addOnsUsed >= pyramidMaxAdds || pyramidAddFraction.compareTo(ZERO) <= 0 || openPrice == null) {
+        if (!pendingAddOn
+                || addOnsLocked
+                || addOnsUsed >= pyramidMaxAdds
+                || pyramidAddFraction.compareTo(ZERO) <= 0
+                || openPrice == null) {
             return;
         }
         remainingSize = remainingSize.add(pyramidAddFraction);
@@ -253,6 +323,7 @@ public final class RuntimePosition {
 
     private void scheduleAddOnIfNeeded(BigDecimal close) {
         if (pendingAddOn
+                || addOnsLocked
                 || close == null
                 || addOnsUsed >= pyramidMaxAdds
                 || pyramidAddFraction.compareTo(ZERO) <= 0
@@ -292,5 +363,10 @@ public final class RuntimePosition {
             return ONE;
         }
         return value;
+    }
+
+    private void lockAddOns() {
+        pendingAddOn = false;
+        addOnsLocked = true;
     }
 }

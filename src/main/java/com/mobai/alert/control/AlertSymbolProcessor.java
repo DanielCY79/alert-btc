@@ -48,6 +48,15 @@ public class AlertSymbolProcessor {
     @Value("${monitoring.kline.limit:80}")
     private int klineLimit;
 
+    @Value("${monitoring.multi-timeframe.role:single-timeframe}")
+    private String multiTimeframeRole;
+
+    @Value("${monitoring.multi-timeframe.context-interval:}")
+    private String contextInterval;
+
+    @Value("${monitoring.multi-timeframe.context-kline-limit:0}")
+    private int contextKlineLimit;
+
     @Value("${monitoring.strategy.breakout.record.ttl.ms:43200000}")
     private long breakoutRecordTtlMs;
 
@@ -144,8 +153,7 @@ public class AlertSymbolProcessor {
             return;
         }
 
-        FeatureSnapshot featureSnapshot = marketFeatureSnapshotService.buildSnapshot(symbol, klineInterval, klines);
-        applyMarketState(symbol, featureSnapshot);
+        FeatureSnapshot featureSnapshot = buildExecutionSnapshot(symbol, klines);
         logFeatureSnapshot(featureSnapshot);
 
         if (sendIfPresent(alertRuleEvaluator.evaluateRangeFailedBreakdownLong(klines), featureSnapshot)) {
@@ -155,28 +163,28 @@ public class AlertSymbolProcessor {
             return;
         }
 
-        if (confirmPendingBreakout(klines, longBreakoutKey(), shortBreakoutKey(), featureSnapshot)) {
+        if (confirmPendingBreakout(klines, longBreakoutKey(symbol), shortBreakoutKey(symbol), featureSnapshot)) {
             return;
         }
-        if (confirmPendingBreakout(klines, shortBreakoutKey(), longBreakoutKey(), featureSnapshot)) {
+        if (confirmPendingBreakout(klines, shortBreakoutKey(symbol), longBreakoutKey(symbol), featureSnapshot)) {
             return;
         }
 
         boolean breakoutCaptured = alertRuleEvaluator.evaluateTrendBreakout(klines)
-                .map(signal -> rememberBreakoutCandidate(signal, longBreakoutKey(), shortBreakoutKey(), true))
+                .map(signal -> rememberBreakoutCandidate(signal, longBreakoutKey(symbol), shortBreakoutKey(symbol), true))
                 .orElse(false);
         if (breakoutCaptured) {
             return;
         }
 
         breakoutCaptured = alertRuleEvaluator.evaluateTrendBreakdown(klines)
-                .map(signal -> rememberBreakoutCandidate(signal, shortBreakoutKey(), longBreakoutKey(), false))
+                .map(signal -> rememberBreakoutCandidate(signal, shortBreakoutKey(symbol), longBreakoutKey(symbol), false))
                 .orElse(false);
         if (breakoutCaptured) {
             return;
         }
 
-        BreakoutRecord longBreakout = activeConfirmedBreakout(klines, longBreakoutKey());
+        BreakoutRecord longBreakout = activeConfirmedBreakout(klines, longBreakoutKey(symbol));
         if (longBreakout != null
                 && sendIfPresent(
                 alertRuleEvaluator.evaluateBreakoutPullback(klines, longBreakout.breakoutLevel(), longBreakout.targetPrice(), true),
@@ -194,7 +202,7 @@ public class AlertSymbolProcessor {
             return;
         }
 
-        BreakoutRecord shortBreakout = activeConfirmedBreakout(klines, shortBreakoutKey());
+        BreakoutRecord shortBreakout = activeConfirmedBreakout(klines, shortBreakoutKey(symbol));
         if (shortBreakout != null
                 && sendIfPresent(
                     alertRuleEvaluator.evaluateBreakoutPullback(klines, shortBreakout.breakoutLevel(), shortBreakout.targetPrice(), false),
@@ -242,10 +250,14 @@ public class AlertSymbolProcessor {
      * 按当前配置拉取最近 K 线。
      */
     private List<BinanceKlineDTO> loadRecentKlines(String symbol) {
+        return loadRecentKlines(symbol, klineInterval, klineLimit);
+    }
+
+    private List<BinanceKlineDTO> loadRecentKlines(String symbol, String interval, int limit) {
         BinanceKlineDTO request = new BinanceKlineDTO();
         request.setSymbol(symbol);
-        request.setInterval(klineInterval);
-        request.setLimit(klineLimit);
+        request.setInterval(interval);
+        request.setLimit(limit);
         request.setTimeZone("8");
         return binanceApi.listKline(request);
     }
@@ -258,12 +270,16 @@ public class AlertSymbolProcessor {
             return false;
         }
 
-        SignalPolicyDecision decision = compositeFactorSignalPolicy.evaluate(signalOptional.get(), featureSnapshot);
+        AlertSignal rawSignal = signalOptional.get();
+        SignalPolicyDecision decision = compositeFactorSignalPolicy.evaluate(rawSignal, featureSnapshot);
         if (!decision.allowed()) {
+            if (tryHandleBlockedCounterTrendSignal(rawSignal, decision, featureSnapshot)) {
+                return true;
+            }
             log.info("Signal blocked by composite policy, symbol={}, signalType={}, direction={}, score={}, reasons={}",
-                    signalOptional.get().getKline().getSymbol(),
-                    signalOptional.get().getType(),
-                    signalOptional.get().getDirection(),
+                    rawSignal.getKline().getSymbol(),
+                    rawSignal.getType(),
+                    rawSignal.getDirection(),
                     StrategySupport.scaleOrNull(decision.score()),
                     String.join(" | ", decision.reasons()));
             return false;
@@ -285,6 +301,113 @@ public class AlertSymbolProcessor {
     /**
      * 对通过过滤的突破信号做发送与缓存，供后续回踩策略继续使用。
      */
+    private boolean tryHandleBlockedCounterTrendSignal(AlertSignal blockedSignal,
+                                                       SignalPolicyDecision decision,
+                                                       FeatureSnapshot featureSnapshot) {
+        if (!isHigherTimeframeConflict(decision)
+                || blockedSignal == null
+                || blockedSignal.getKline() == null
+                || !StringUtils.hasText(blockedSignal.getKline().getSymbol())
+                || blockedSignal.getDirection() == null) {
+            return false;
+        }
+
+        String symbol = blockedSignal.getKline().getSymbol();
+        RuntimePosition activePosition = activePositions.get(symbol);
+        if (activePosition == null || activePosition.direction() == null || activePosition.direction() == blockedSignal.getDirection()) {
+            return false;
+        }
+
+        String conflictReason = decision.reasons().stream()
+                .filter(reason -> reason.startsWith("Block: "))
+                .findFirst()
+                .orElse("Block: higher-timeframe conflict");
+        String contextDetail = buildConflictContext(blockedSignal, decision, featureSnapshot);
+        AlertSignal managementSignal = buildConflictManagementSignal(
+                symbol,
+                blockedSignal,
+                activePosition,
+                conflictReason,
+                contextDetail
+        );
+        if (managementSignal == null) {
+            return false;
+        }
+
+        if (managementSignal.getType().startsWith("EXIT_CONFLICT_CLOSE_")) {
+            activePositions.remove(symbol);
+        }
+        sendRuntimeManagementSignal(symbol, activePosition, managementSignal);
+        return true;
+    }
+
+    private boolean isHigherTimeframeConflict(SignalPolicyDecision decision) {
+        if (decision == null || decision.allowed() || decision.reasons() == null || decision.reasons().isEmpty()) {
+            return false;
+        }
+        boolean hasHigherTimeframeContext = decision.reasons().stream().anyMatch(reason -> reason.startsWith("HigherTF("));
+        boolean hasBlockingReason = decision.reasons().stream().anyMatch(reason -> reason.startsWith("Block: "));
+        boolean missingContextOnly = decision.reasons().stream().anyMatch("Block: missing higher-timeframe context"::equals);
+        return hasHigherTimeframeContext && hasBlockingReason && !missingContextOnly;
+    }
+
+    private AlertSignal buildConflictManagementSignal(String symbol,
+                                                     AlertSignal blockedSignal,
+                                                     RuntimePosition activePosition,
+                                                     String conflictReason,
+                                                     String contextDetail) {
+        BinanceKlineDTO referenceBar = blockedSignal.getKline();
+        if (activePosition.canConflictReduce()) {
+            BigDecimal reducedSize = activePosition.applyConflictReduce();
+            return buildConflictReduceSignal(
+                    symbol,
+                    referenceBar,
+                    activePosition,
+                    blockedSignal,
+                    conflictReason,
+                    contextDetail,
+                    reducedSize
+            );
+        }
+        if (activePosition.canTightenConflictStop()) {
+            BigDecimal previousStop = activePosition.stopPrice();
+            if (activePosition.tightenStopForConflict()) {
+                return buildConflictTightenStopSignal(
+                        symbol,
+                        referenceBar,
+                        activePosition,
+                        blockedSignal,
+                        conflictReason,
+                        contextDetail,
+                        previousStop
+                );
+            }
+        }
+        activePosition.prepareForConflictExit();
+        return buildConflictCloseSignal(symbol, referenceBar, activePosition, blockedSignal, conflictReason, contextDetail);
+    }
+
+    private String buildConflictContext(AlertSignal blockedSignal,
+                                        SignalPolicyDecision decision,
+                                        FeatureSnapshot featureSnapshot) {
+        StringBuilder builder = new StringBuilder();
+        builder.append("blockedSignal=").append(defaultText(blockedSignal == null ? null : blockedSignal.getType(), "-"));
+        builder.append(" | blockedDirection=").append(blockedSignal == null ? "-" : blockedSignal.getDirection());
+        if (decision != null && decision.reasons() != null && !decision.reasons().isEmpty()) {
+            builder.append(" | policyReasons=").append(String.join(" / ", decision.reasons()));
+        }
+        FeatureSnapshot contextSnapshot = featureSnapshot == null ? null : featureSnapshot.getContextSnapshot();
+        if (contextSnapshot != null) {
+            builder.append(" | higherTFInterval=").append(defaultText(contextSnapshot.getInterval(), "-"));
+            builder.append(" | higherTFState=").append(contextSnapshot.getMarketState() == null ? "-" : contextSnapshot.getMarketState());
+        }
+        return builder.toString();
+    }
+
+    private String defaultText(String value, String fallback) {
+        return StringUtils.hasText(value) ? value : fallback;
+    }
+
     private boolean rememberBreakoutCandidate(AlertSignal signal,
                                               String recordKey,
                                               String oppositeKey,
@@ -420,38 +543,81 @@ public class AlertSymbolProcessor {
     /**
      * 多头突破记忆键。
      */
-    private String longBreakoutKey() {
-        return targetSymbol + ":LONG";
+    private String longBreakoutKey(String symbol) {
+        return stateKey(symbol, klineInterval) + ":LONG";
     }
 
     /**
      * 空头突破记忆键。
      */
-    private String shortBreakoutKey() {
-        return targetSymbol + ":SHORT";
+    private String shortBreakoutKey(String symbol) {
+        return stateKey(symbol, klineInterval) + ":SHORT";
     }
 
     /**
      * 记录特征快照摘要，便于排查因子是否准备齐全。
      */
-    private void applyMarketState(String symbol, FeatureSnapshot featureSnapshot) {
+    private FeatureSnapshot buildExecutionSnapshot(String symbol, List<BinanceKlineDTO> executionKlines) {
+        FeatureSnapshot executionSnapshot = marketFeatureSnapshotService.buildSnapshot(symbol, klineInterval, executionKlines);
+        applyMarketState(symbol, klineInterval, executionSnapshot);
+
+        FeatureSnapshot contextSnapshot = loadContextSnapshot(symbol);
+        if (contextSnapshot != null) {
+            executionSnapshot.setContextSnapshot(contextSnapshot);
+        }
+        marketFeatureSnapshotService.rememberLatestSnapshot(executionSnapshot);
+        return executionSnapshot;
+    }
+
+    private FeatureSnapshot loadContextSnapshot(String symbol) {
+        if (!isExecutionRole() || !StringUtils.hasText(contextInterval) || contextInterval.equalsIgnoreCase(klineInterval)) {
+            return null;
+        }
+
+        int resolvedLimit = contextKlineLimit > 0 ? contextKlineLimit : klineLimit;
+        List<BinanceKlineDTO> contextKlines = loadRecentKlines(symbol, contextInterval, resolvedLimit);
+        if (CollectionUtils.isEmpty(contextKlines) || contextKlines.size() < 3) {
+            log.warn("Skip higher timeframe context, symbol={}, executionInterval={}, contextInterval={}, count={}",
+                    symbol,
+                    klineInterval,
+                    contextInterval,
+                    contextKlines == null ? 0 : contextKlines.size());
+            return null;
+        }
+
+        FeatureSnapshot contextSnapshot = marketFeatureSnapshotService.buildSnapshot(symbol, contextInterval, contextKlines);
+        applyMarketState(symbol, contextInterval, contextSnapshot);
+        return contextSnapshot;
+    }
+
+    private void applyMarketState(String symbol, String interval, FeatureSnapshot featureSnapshot) {
         if (featureSnapshot == null) {
             return;
         }
 
-        MarketState previousState = marketStates.getOrDefault(symbol, MarketState.UNKNOWN);
+        String stateKey = stateKey(symbol, interval);
+        MarketState previousState = marketStates.getOrDefault(stateKey, MarketState.UNKNOWN);
         MarketStateDecision decision = marketStateMachine.evaluate(featureSnapshot, previousState);
         featureSnapshot.setMarketState(decision.state());
         featureSnapshot.setMarketStateComment(decision.comment());
-        marketStates.put(symbol, decision.state());
+        marketStates.put(stateKey, decision.state());
 
         if (previousState != decision.state()) {
-            log.info("Market state transitioned, symbol={}, previousState={}, currentState={}, comment={}",
+            log.info("Market state transitioned, symbol={}, interval={}, previousState={}, currentState={}, comment={}",
                     symbol,
+                    interval,
                     previousState,
                     decision.state(),
                     decision.comment());
         }
+    }
+
+    private boolean isExecutionRole() {
+        return "execution".equalsIgnoreCase(multiTimeframeRole);
+    }
+
+    private String stateKey(String symbol, String interval) {
+        return symbol + "@" + interval;
     }
 
     private void logFeatureSnapshot(FeatureSnapshot featureSnapshot) {
@@ -459,8 +625,10 @@ public class AlertSymbolProcessor {
             return;
         }
 
-        log.info("Feature snapshot ready, symbol={}, asOfTime={}, marketState={}, stateComment={}, trendBias={}, breakoutConfirmation={}, crowding={}, eventBias={}, regimeRisk={}, priceReady={}, derivativeReady={}, relevantEvents={}",
+        FeatureSnapshot contextSnapshot = featureSnapshot.getContextSnapshot();
+        log.info("Feature snapshot ready, symbol={}, interval={}, asOfTime={}, marketState={}, stateComment={}, trendBias={}, breakoutConfirmation={}, crowding={}, eventBias={}, regimeRisk={}, contextInterval={}, contextState={}, contextTrendBias={}, contextBreakout={}, priceReady={}, derivativeReady={}, relevantEvents={}",
                 featureSnapshot.getSymbol(),
+                featureSnapshot.getInterval(),
                 featureSnapshot.getAsOfTime(),
                 featureSnapshot.getMarketState(),
                 featureSnapshot.getMarketStateComment(),
@@ -469,6 +637,14 @@ public class AlertSymbolProcessor {
                 StrategySupport.scaleOrNull(featureSnapshot.getCompositeFactors().getCrowdingScore()),
                 StrategySupport.scaleOrNull(featureSnapshot.getCompositeFactors().getEventBiasScore()),
                 StrategySupport.scaleOrNull(featureSnapshot.getCompositeFactors().getRegimeRiskScore()),
+                contextSnapshot == null ? "-" : contextSnapshot.getInterval(),
+                contextSnapshot == null ? "-" : contextSnapshot.getMarketState(),
+                contextSnapshot == null || contextSnapshot.getCompositeFactors() == null
+                        ? "-"
+                        : StrategySupport.scaleOrNull(contextSnapshot.getCompositeFactors().getTrendBiasScore()),
+                contextSnapshot == null || contextSnapshot.getCompositeFactors() == null
+                        ? "-"
+                        : StrategySupport.scaleOrNull(contextSnapshot.getCompositeFactors().getBreakoutConfirmationScore()),
                 featureSnapshot.getQuality().isPriceReady(),
                 featureSnapshot.getQuality().isDerivativeReady(),
                 featureSnapshot.getQuality().getRelevantEventCount());
@@ -804,6 +980,87 @@ public class AlertSymbolProcessor {
         );
     }
 
+    private AlertSignal buildConflictReduceSignal(String symbol,
+                                                  BinanceKlineDTO bar,
+                                                  RuntimePosition activePosition,
+                                                  AlertSignal blockedSignal,
+                                                  String conflictReason,
+                                                  String contextDetail,
+                                                  BigDecimal reducedSize) {
+        String summary = String.format(
+                "前序 %s 持仓期间，出现与大级别方向相悖的 %s，当前更适合先减仓 %s，保留主趋势仓位观察，而不是直接反手。",
+                activePosition.signalType(),
+                blockedSignal.getType(),
+                formatFraction(reducedSize)
+        );
+        return buildRuntimeManagementSignal(
+                symbol,
+                List.of(bar),
+                bar,
+                activePosition,
+                "EXIT_CONFLICT_REDUCE_" + activePosition.direction().name(),
+                symbol + " 高周期冲突，先减仓观察",
+                summary,
+                StrategySupport.valueOf(bar.getClose()),
+                "CONFLICT_REDUCE",
+                contextDetail + " | conflictReason=" + conflictReason
+        );
+    }
+
+    private AlertSignal buildConflictTightenStopSignal(String symbol,
+                                                       BinanceKlineDTO bar,
+                                                       RuntimePosition activePosition,
+                                                       AlertSignal blockedSignal,
+                                                       String conflictReason,
+                                                       String contextDetail,
+                                                       BigDecimal previousStop) {
+        String summary = String.format(
+                "前序 %s 持仓期间，出现与大级别方向相悖的 %s，当前更适合把防守位从 %s 收紧到 %s，先保护仓位，再等市场给出更清晰的答案。",
+                activePosition.signalType(),
+                blockedSignal.getType(),
+                StrategySupport.scaleOrNull(previousStop),
+                StrategySupport.scaleOrNull(activePosition.stopPrice())
+        );
+        return buildRuntimeManagementSignal(
+                symbol,
+                List.of(bar),
+                bar,
+                activePosition,
+                "EXIT_CONFLICT_TIGHTEN_STOP_" + activePosition.direction().name(),
+                symbol + " 高周期冲突，收紧防守",
+                summary,
+                activePosition.stopPrice(),
+                "CONFLICT_TIGHTEN_STOP",
+                contextDetail + " | conflictReason=" + conflictReason
+        );
+    }
+
+    private AlertSignal buildConflictCloseSignal(String symbol,
+                                                 BinanceKlineDTO bar,
+                                                 RuntimePosition activePosition,
+                                                 AlertSignal blockedSignal,
+                                                 String conflictReason,
+                                                 String contextDetail) {
+        String summary = String.format(
+                "前序 %s 持仓期间，高低周期冲突继续扩大，并出现 %s，当前更适合先结束剩余仓位，等待重新同向的入场机会。",
+                activePosition.signalType(),
+                blockedSignal.getType()
+        );
+        return buildRuntimeManagementSignal(
+                symbol,
+                List.of(bar),
+                bar,
+                activePosition,
+                "EXIT_CONFLICT_CLOSE_" + activePosition.direction().name(),
+                symbol + " 高周期冲突，先退出等待",
+                summary,
+                StrategySupport.valueOf(bar.getClose()),
+                "CONFLICT_CLOSE",
+                contextDetail + " | conflictReason=" + conflictReason
+        );
+    }
+
+
     private AlertSignal buildRuntimeManagementSignal(String symbol,
                                                      List<BinanceKlineDTO> klines,
                                                      BinanceKlineDTO bar,
@@ -813,6 +1070,30 @@ public class AlertSymbolProcessor {
                                                      String summary,
                                                      BigDecimal referencePrice,
                                                      String reasonTag) {
+        return buildRuntimeManagementSignal(
+                symbol,
+                klines,
+                bar,
+                activePosition,
+                type,
+                title,
+                summary,
+                referencePrice,
+                reasonTag,
+                null
+        );
+    }
+
+    private AlertSignal buildRuntimeManagementSignal(String symbol,
+                                                     List<BinanceKlineDTO> klines,
+                                                     BinanceKlineDTO bar,
+                                                     RuntimePosition activePosition,
+                                                     String type,
+                                                     String title,
+                                                     String summary,
+                                                     BigDecimal referencePrice,
+                                                     String reasonTag,
+                                                     String extraContext) {
         return new AlertSignal(
                 activePosition.direction(),
                 title,
@@ -824,7 +1105,7 @@ public class AlertSymbolProcessor {
                 scalePrice(activePosition.targetPrice()),
                 buildVolumeRatio(klines, bar),
                 null,
-                buildPositionContext(activePosition, reasonTag),
+                buildPositionContext(activePosition, reasonTag, extraContext),
                 scalePrice(activePosition.entryPrice()),
                 scalePrice(activePosition.initialStopPrice())
         );
@@ -853,16 +1134,23 @@ public class AlertSymbolProcessor {
         );
     }
 
-    private String buildPositionContext(RuntimePosition activePosition, String reasonTag) {
-        return "entryType=" + activePosition.signalType()
+    private String buildPositionContext(RuntimePosition activePosition, String reasonTag, String extraContext) {
+        String context = "entryType=" + activePosition.signalType()
                 + " | entryPrice=" + StrategySupport.scaleOrNull(activePosition.entryPrice())
                 + " | initialStop=" + StrategySupport.scaleOrNull(activePosition.initialStopPrice())
                 + " | activeStop=" + StrategySupport.scaleOrNull(activePosition.stopPrice())
                 + " | remainingSize=" + StrategySupport.scaleOrNull(activePosition.remainingSize())
                 + " | scaleOut=" + activePosition.scaleOutTaken()
+                + " | conflictReduced=" + activePosition.conflictReduced()
+                + " | conflictStopTightened=" + activePosition.conflictStopTightened()
                 + " | addOns=" + activePosition.addOnsUsed()
                 + " | pendingAddOn=" + activePosition.pendingAddOn()
+                + " | addOnsLocked=" + activePosition.addOnsLocked()
                 + " | reason=" + reasonTag;
+        if (!StringUtils.hasText(extraContext)) {
+            return context;
+        }
+        return context + " | " + extraContext;
     }
 
     private BigDecimal scalePrice(BigDecimal value) {

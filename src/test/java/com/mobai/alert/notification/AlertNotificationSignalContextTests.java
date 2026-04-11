@@ -135,6 +135,99 @@ class AlertNotificationSignalContextTests {
     }
 
     @Test
+    void shouldRenderConflictReduceExitTemplate() {
+        AlertNotifier notifier = notifier();
+        AlertNotificationService service = service(notifier);
+
+        AlertSignal signal = new AlertSignal(
+                TradeDirection.LONG,
+                "BTCUSDT 高周期冲突，先减仓观察",
+                kline("100.80", "101.20", "100.30", "101.00", "88000"),
+                "EXIT_CONFLICT_REDUCE_LONG",
+                "前序 CONFIRMED_BREAKOUT_LONG 持仓期间，出现与大级别方向相悖的 SECOND_ENTRY_SHORT，当前更适合先减仓 50%，保留主趋势仓位观察，而不是直接反手。",
+                new BigDecimal("101.00"),
+                new BigDecimal("95.00"),
+                new BigDecimal("115.00"),
+                new BigDecimal("0.92"),
+                null,
+                "entryType=CONFIRMED_BREAKOUT_LONG | remainingSize=0.50 | conflictReduced=true | reason=CONFLICT_REDUCE",
+                new BigDecimal("100.00"),
+                new BigDecimal("95.00")
+        );
+
+        service.send(signal);
+
+        String plainText = captureMessage(notifier).plainTextContent();
+        assertThat(plainText).contains("高周期冲突，先减仓观察");
+        assertThat(plainText).contains("先减仓降暴露");
+        assertThat(plainText).contains("与高一级别背景相冲突的反向信号");
+        assertThat(plainText).contains("保留主趋势仓位观察");
+        assertThat(plainText).contains("当前浮动R: 0.20R");
+    }
+
+    @Test
+    void shouldRenderConflictTightenStopExitTemplate() {
+        AlertNotifier notifier = notifier();
+        AlertNotificationService service = service(notifier);
+
+        AlertSignal signal = new AlertSignal(
+                TradeDirection.LONG,
+                "BTCUSDT 高周期冲突，收紧防守",
+                kline("100.90", "101.40", "100.50", "101.20", "86000"),
+                "EXIT_CONFLICT_TIGHTEN_STOP_LONG",
+                "前序 CONFIRMED_BREAKOUT_LONG 持仓期间，出现与大级别方向相悖的 SECOND_ENTRY_SHORT，当前更适合把防守位从 95.00 收紧到 100.00，先保护仓位，再等市场给出更清晰的答案。",
+                new BigDecimal("100.00"),
+                new BigDecimal("100.00"),
+                new BigDecimal("115.00"),
+                new BigDecimal("0.88"),
+                null,
+                "entryType=CONFIRMED_BREAKOUT_LONG | activeStop=100.00 | conflictStopTightened=true | reason=CONFLICT_TIGHTEN_STOP",
+                new BigDecimal("100.00"),
+                new BigDecimal("95.00")
+        );
+
+        service.send(signal);
+
+        String plainText = captureMessage(notifier).plainTextContent();
+        assertThat(plainText).contains("高周期冲突，收紧防守");
+        assertThat(plainText).contains("把止损收紧到新的防守位");
+        assertThat(plainText).contains("顺势接受度可能减弱");
+        assertThat(plainText).contains("先保护仓位");
+        assertThat(plainText).contains("当前防守位: 100.00 USDT");
+    }
+
+    @Test
+    void shouldRenderConflictCloseExitTemplate() {
+        AlertNotifier notifier = notifier();
+        AlertNotificationService service = service(notifier);
+
+        AlertSignal signal = new AlertSignal(
+                TradeDirection.LONG,
+                "BTCUSDT 高周期冲突，先退出等待",
+                kline("99.60", "100.20", "99.10", "99.40", "93000"),
+                "EXIT_CONFLICT_CLOSE_LONG",
+                "前序 CONFIRMED_BREAKOUT_LONG 持仓期间，高低周期冲突继续扩大，并出现 SECOND_ENTRY_SHORT，当前更适合先结束剩余仓位，等待重新同向的入场机会。",
+                new BigDecimal("99.40"),
+                new BigDecimal("100.00"),
+                new BigDecimal("115.00"),
+                new BigDecimal("1.05"),
+                null,
+                "entryType=CONFIRMED_BREAKOUT_LONG | remainingSize=0.50 | addOnsLocked=true | reason=CONFLICT_CLOSE",
+                new BigDecimal("100.00"),
+                new BigDecimal("95.00")
+        );
+
+        service.send(signal);
+
+        String plainText = captureMessage(notifier).plainTextContent();
+        assertThat(plainText).contains("高周期冲突，先退出等待");
+        assertThat(plainText).contains("直接结束剩余仓位");
+        assertThat(plainText).contains("高低周期冲突已经升级");
+        assertThat(plainText).contains("等待重新同向的入场机会");
+        assertThat(plainText).contains("当前浮动R: -0.12R");
+    }
+
+    @Test
     void shouldRenderTrailingStopExitTemplate() {
         AlertNotifier notifier = notifier();
         AlertNotificationService service = service(notifier);

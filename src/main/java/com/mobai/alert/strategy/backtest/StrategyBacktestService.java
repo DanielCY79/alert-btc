@@ -25,6 +25,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
+import org.springframework.util.StringUtils;
 
 import java.lang.reflect.Field;
 import java.math.BigDecimal;
@@ -50,7 +51,11 @@ public class StrategyBacktestService {
 
     private static final BigDecimal ZERO = BigDecimal.ZERO;
     private static final BigDecimal ONE_HUNDRED = new BigDecimal("100");
+    private static final long THREE_MINUTES_MS = 3L * 60L * 1000L;
+    private static final long FIFTEEN_MINUTES_MS = 15L * 60L * 1000L;
+    private static final long ONE_HOUR_MS = 60L * 60L * 1000L;
     private static final long FOUR_HOURS_MS = 4L * 60L * 60L * 1000L;
+    private static final long ONE_DAY_MS = 24L * 60L * 60L * 1000L;
     private static final int PAGE_LIMIT = 1000;
 
     private final BinanceApi binanceApi;
@@ -214,6 +219,12 @@ public class StrategyBacktestService {
     @Value("${backtest.policy.missing-derivative-penalty:0.00}")
     private BigDecimal backtestMissingDerivativePenalty;
 
+    @Value("${backtest.multi-timeframe.role:${monitoring.multi-timeframe.role:single-timeframe}}")
+    private String backtestMultiTimeframeRole = "single-timeframe";
+
+    @Value("${backtest.multi-timeframe.context-interval:${monitoring.multi-timeframe.context-interval:}}")
+    private String backtestContextInterval;
+
     private final BacktestFeatureSnapshotService backtestFeatureSnapshotService;
     private final CompositeFactorSignalPolicy compositeFactorSignalPolicy;
     private final MarketStateMachine marketStateMachine;
@@ -328,6 +339,7 @@ public class StrategyBacktestService {
         Map<String, Integer> signalCounts = new LinkedHashMap<>();
         SignalAudit audit = new SignalAudit();
         MarketState currentMarketState = MarketState.UNKNOWN;
+        HigherTimeframeBacktestContext higherTimeframeContext = prepareHigherTimeframeBacktestContext(config);
 
         ManagedPosition activePosition = null;
         for (int barIndex = 1; barIndex < history.size(); barIndex++) {
@@ -338,10 +350,15 @@ public class StrategyBacktestService {
                     ? null
                     : backtestFeatureSnapshotService.buildSnapshot(config.symbol(), config.interval(), visibleKlines);
             if (featureSnapshot != null) {
-                MarketStateDecision stateDecision = marketStateMachine.evaluate(featureSnapshot, currentMarketState);
-                featureSnapshot.setMarketState(stateDecision.state());
-                featureSnapshot.setMarketStateComment(stateDecision.comment());
-                currentMarketState = stateDecision.state();
+                currentMarketState = applyBacktestMarketState(featureSnapshot, currentMarketState);
+                FeatureSnapshot contextSnapshot = higherTimeframeContext.snapshotFor(
+                        currentBar.getEndTime(),
+                        backtestFeatureSnapshotService,
+                        marketStateMachine
+                );
+                if (contextSnapshot != null) {
+                    featureSnapshot.setContextSnapshot(contextSnapshot);
+                }
             }
 
             if (activePosition == null) {
@@ -388,6 +405,13 @@ public class StrategyBacktestService {
                 report.blockedSignalCount(),
                 report.compositePolicyApplied());
         return report;
+    }
+
+    private MarketState applyBacktestMarketState(FeatureSnapshot snapshot, MarketState previousState) {
+        MarketStateDecision stateDecision = marketStateMachine.evaluate(snapshot, previousState);
+        snapshot.setMarketState(stateDecision.state());
+        snapshot.setMarketStateComment(stateDecision.comment());
+        return stateDecision.state();
     }
 
     /**
@@ -973,6 +997,41 @@ public class StrategyBacktestService {
     /**
      * 判断目标价相对入场方向是否有效。
      */
+    private HigherTimeframeBacktestContext prepareHigherTimeframeBacktestContext(BacktestConfig config) {
+        if (!isBacktestExecutionRole()
+                || !StringUtils.hasText(backtestContextInterval)
+                || backtestContextInterval.equalsIgnoreCase(config.interval())
+                || binanceApi == null) {
+            return HigherTimeframeBacktestContext.disabled();
+        }
+
+        List<BinanceKlineDTO> contextHistory = loadHistoricalKlines(
+                config.symbol(),
+                backtestContextInterval,
+                config.startTime(),
+                config.endTime()
+        );
+        if (contextHistory.size() < 3) {
+            log.warn("Skip higher timeframe backtest context, symbol={}, executionInterval={}, contextInterval={}, bars={}",
+                    config.symbol(),
+                    config.interval(),
+                    backtestContextInterval,
+                    contextHistory.size());
+            return HigherTimeframeBacktestContext.disabled();
+        }
+
+        log.info("Higher timeframe backtest context ready, symbol={}, executionInterval={}, contextInterval={}, bars={}",
+                config.symbol(),
+                config.interval(),
+                backtestContextInterval,
+                contextHistory.size());
+        return new HigherTimeframeBacktestContext(config.symbol(), backtestContextInterval, contextHistory);
+    }
+
+    private boolean isBacktestExecutionRole() {
+        return "execution".equalsIgnoreCase(backtestMultiTimeframeRole);
+    }
+
     private boolean isTargetValid(TradeDirection direction, BigDecimal entryPrice, BigDecimal targetPrice) {
         if (targetPrice == null) {
             return false;
@@ -1161,14 +1220,19 @@ public class StrategyBacktestService {
     /**
      * 把周期字符串换算成毫秒。
      */
-    private long intervalMs(String interval) {
+    static long resolveIntervalMs(String interval) {
         return switch (interval) {
+            case "3m" -> THREE_MINUTES_MS;
+            case "15m" -> FIFTEEN_MINUTES_MS;
+            case "1h" -> ONE_HOUR_MS;
             case "4h" -> FOUR_HOURS_MS;
-            case "1h" -> 60L * 60L * 1000L;
-            case "15m" -> 15L * 60L * 1000L;
-            case "1d" -> 24L * 60L * 60L * 1000L;
+            case "1d" -> ONE_DAY_MS;
             default -> FOUR_HOURS_MS;
         };
+    }
+
+    private long intervalMs(String interval) {
+        return resolveIntervalMs(interval);
     }
 
     private BigDecimal decimal(String value) {
@@ -1195,6 +1259,55 @@ public class StrategyBacktestService {
     private record BreakoutConfirmationResult(boolean confirmed, Optional<AlertSignal> signal) {
         private static BreakoutConfirmationResult notConfirmed() {
             return new BreakoutConfirmationResult(false, Optional.empty());
+        }
+    }
+
+    private static final class HigherTimeframeBacktestContext {
+        private final String symbol;
+        private final String interval;
+        private final List<BinanceKlineDTO> history;
+        private int visibleCount;
+        private long cachedAsOfTime = Long.MIN_VALUE;
+        private FeatureSnapshot cachedSnapshot;
+        private MarketState currentMarketState = MarketState.UNKNOWN;
+
+        private HigherTimeframeBacktestContext(String symbol, String interval, List<BinanceKlineDTO> history) {
+            this.symbol = symbol;
+            this.interval = interval;
+            this.history = history;
+        }
+
+        private static HigherTimeframeBacktestContext disabled() {
+            return new HigherTimeframeBacktestContext(null, null, List.of());
+        }
+
+        private FeatureSnapshot snapshotFor(long executionBarEndTime,
+                                            BacktestFeatureSnapshotService snapshotService,
+                                            MarketStateMachine stateMachine) {
+            if (history.isEmpty() || snapshotService == null || stateMachine == null) {
+                return null;
+            }
+
+            while (visibleCount < history.size() && history.get(visibleCount).getEndTime() <= executionBarEndTime) {
+                visibleCount++;
+            }
+            if (visibleCount < 3) {
+                return null;
+            }
+
+            long asOfTime = history.get(visibleCount - 1).getEndTime();
+            if (cachedSnapshot != null && cachedAsOfTime == asOfTime) {
+                return cachedSnapshot;
+            }
+
+            FeatureSnapshot snapshot = snapshotService.buildSnapshot(symbol, interval, history.subList(0, visibleCount));
+            MarketStateDecision stateDecision = stateMachine.evaluate(snapshot, currentMarketState);
+            snapshot.setMarketState(stateDecision.state());
+            snapshot.setMarketStateComment(stateDecision.comment());
+            currentMarketState = stateDecision.state();
+            cachedAsOfTime = asOfTime;
+            cachedSnapshot = snapshot;
+            return snapshot;
         }
     }
 

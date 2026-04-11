@@ -12,6 +12,7 @@ import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -47,5 +48,44 @@ class AlertNotificationServiceTests {
         verify(notifier).send(captor.capture());
         assertTrue(captor.getValue().plainTextContent().contains("SEC delays Bitcoin ETF decision"));
         assertTrue(captor.getValue().plainTextContent().contains("https://example.com/btc-etf"));
+    }
+
+    @Test
+    void shouldThrottleDuplicateNotificationsWhenCooldownEnabled() {
+        AlertNotifier notifier = mock(AlertNotifier.class);
+        when(notifier.channelName()).thenReturn("feishu");
+        AlertNotificationService service = new AlertNotificationService(List.of(notifier));
+        ReflectionTestUtils.setField(service, "notificationChannel", "feishu");
+        ReflectionTestUtils.setField(service, "notificationCooldownMs", 60_000L);
+
+        MarketEventDTO event = new MarketEventDTO();
+        event.setSource("gdelt_doc");
+        event.setEventTime(Instant.parse("2026-04-10T15:30:00Z"));
+        event.setRawText("same event");
+
+        service.sendMarketEvent(event, "same title", "https://example.com/a");
+        service.sendMarketEvent(event, "same title", "https://example.com/a");
+
+        verify(notifier, times(1)).send(org.mockito.ArgumentMatchers.any(NotificationMessage.class));
+    }
+
+    @Test
+    void shouldPrefixNotificationsWithProfileLabelWhenConfigured() {
+        AlertNotifier notifier = mock(AlertNotifier.class);
+        when(notifier.channelName()).thenReturn("feishu");
+        AlertNotificationService service = new AlertNotificationService(List.of(notifier));
+        ReflectionTestUtils.setField(service, "notificationChannel", "feishu");
+        ReflectionTestUtils.setField(service, "profileLabel", "Intraday 3M");
+
+        MarketEventDTO event = new MarketEventDTO();
+        event.setSource("gdelt_doc");
+        event.setEventTime(Instant.parse("2026-04-10T15:30:00Z"));
+        event.setRawText("same event");
+
+        service.sendMarketEvent(event, "same title", "https://example.com/a");
+
+        ArgumentCaptor<NotificationMessage> captor = ArgumentCaptor.forClass(NotificationMessage.class);
+        verify(notifier).send(captor.capture());
+        assertTrue(captor.getValue().plainTextContent().startsWith("[Intraday 3M]"));
     }
 }

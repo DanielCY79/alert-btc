@@ -20,6 +20,12 @@ import static org.assertj.core.api.Assertions.assertThat;
  */
 class StrategyBacktestServiceFormattingTests {
 
+    @Test
+    void shouldResolveThreeMinuteIntervalForIntradayBacktests() {
+        assertThat(StrategyBacktestService.resolveIntervalMs("3m")).isEqualTo(180_000L);
+        assertThat(StrategyBacktestService.resolveIntervalMs("unknown")).isEqualTo(4L * 60L * 60L * 1000L);
+    }
+
     /**
      * 批量回测文本应同时包含原始结果、策略结果及对比信息。
      */

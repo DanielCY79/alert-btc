@@ -74,6 +74,7 @@ class MarketFeatureSnapshotServiceTests {
         assertThat(snapshot.getQuality().isPriceReady()).isTrue();
         assertThat(snapshot.getQuality().isDerivativeReady()).isTrue();
         assertThat(service.getLatestSnapshot("BTCUSDT")).isSameAs(snapshot);
+        assertThat(service.getLatestSnapshot("BTCUSDT", "4h")).isSameAs(snapshot);
     }
 
     /**

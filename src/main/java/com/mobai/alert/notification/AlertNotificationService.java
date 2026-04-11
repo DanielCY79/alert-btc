@@ -10,7 +10,6 @@ import com.mobai.alert.state.signal.TradeDirection;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 import org.springframework.util.CollectionUtils;
 import org.springframework.util.StringUtils;
@@ -30,7 +29,6 @@ import java.util.concurrent.ConcurrentHashMap;
 public class AlertNotificationService {
 
     private static final Logger log = LoggerFactory.getLogger(AlertNotificationService.class);
-    private static final long COOLDOWN_PERIOD = 2 * 60 * 60 * 1000L;
     private static final BigDecimal ZERO = BigDecimal.ZERO;
     private static final BigDecimal ONE_HUNDRED = new BigDecimal("100");
     private static final BigDecimal SAFE_CHASE_DISTANCE_PCT = new BigDecimal("0.30");
@@ -46,7 +44,13 @@ public class AlertNotificationService {
     private final Map<String, Long> sentRecords = new ConcurrentHashMap<>();
 
     @Value("${notification.channel:feishu}")
-    private String notificationChannel;
+    private String notificationChannel = "feishu";
+
+    @Value("${notification.cooldown-ms:0}")
+    private long notificationCooldownMs;
+
+    @Value("${monitoring.profile.label:}")
+    private String profileLabel = "";
 
     public AlertNotificationService(List<AlertNotifier> alertNotifiers) {
         this.alertNotifiers = alertNotifiers;
@@ -57,19 +61,16 @@ public class AlertNotificationService {
     }
 
     public void send(AlertSignal signal) {
-        String recordKey = signal.getKline().getSymbol() + signal.getType();
         NotificationMessage message = isExit(signal)
                 ? buildRuntimeExitSignalMessage(signal)
                 : buildSignalMessage(signal);
-        send(recordKey, message, "策略信号", signal.getKline().getSymbol(), signal.getType());
+        send(message, "策略信号", signal.getKline().getSymbol(), signal.getType());
     }
 
     public void sendAnnouncement(BinanceAnnouncementDTO announcement) {
         String title = StringUtils.hasText(announcement.getTitle()) ? announcement.getTitle() : "Binance 公告";
-        long publishDate = announcement.getPublishDate() == null ? 0L : announcement.getPublishDate();
-        String recordKey = "announcement:" + publishDate + ":" + title;
         NotificationMessage message = buildAnnouncementMessage(announcement);
-        send(recordKey, message, "公告", announcement.getTopic(), title);
+        send(message, "公告", announcement.getTopic(), title);
     }
 
     public void sendMarketEvent(MarketEventDTO event, String title, String url) {
@@ -77,31 +78,8 @@ public class AlertNotificationService {
             return;
         }
         String normalizedTitle = StringUtils.hasText(title) ? title : event.getRawText();
-        long eventTime = event.getEventTime() == null ? 0L : event.getEventTime().toEpochMilli();
-        String recordKey = "market-event:" + event.getSource() + ":" + eventTime + ":" + normalizedTitle;
         NotificationMessage message = buildMarketEventMessage(event, normalizedTitle, url);
-        send(recordKey, message, "市场事件", event.getSource(), normalizedTitle);
-    }
-
-    @Scheduled(fixedDelay = 5 * 60 * 1000L)
-    public void cleanupExpiredRecords() {
-        long currentTime = System.currentTimeMillis();
-        int before = sentRecords.size();
-        sentRecords.entrySet().removeIf(entry -> currentTime - entry.getValue() > COOLDOWN_PERIOD);
-        int removed = before - sentRecords.size();
-        if (removed > 0) {
-            log.info("已清理 {} 条过期通知冷却记录", removed);
-        }
-    }
-
-    private boolean allowSend(String recordKey) {
-        long currentTime = System.currentTimeMillis();
-        Long lastSentTime = sentRecords.get(recordKey);
-        if (lastSentTime == null || currentTime - lastSentTime > COOLDOWN_PERIOD) {
-            sentRecords.put(recordKey, currentTime);
-            return true;
-        }
-        return false;
+        send(message, "市场事件", event.getSource(), normalizedTitle);
     }
 
     private NotificationMessage buildSignalMessage(AlertSignal signal) {
@@ -633,13 +611,13 @@ public class AlertNotificationService {
         return channelName.trim().toLowerCase(Locale.ROOT);
     }
 
-    private void send(String recordKey, NotificationMessage message, String category, String subject, String detail) {
-        if (!allowSend(recordKey)) {
-            log.info("跳过发送{}，仍处于冷却期，recordKey={}, subject={}, detail={}",
+    private void send(NotificationMessage message, String category, String subject, String detail) {
+        if (!allowSend(category, subject, detail)) {
+            log.info("璺宠繃鍙戦€丄{}锛屼粛澶勪簬鍐峰嵈鏈燂紝subject={}, detail={}, cooldownMs={}",
                     category,
-                    recordKey,
                     subject,
-                    detail);
+                    detail,
+                    notificationCooldownMs);
             return;
         }
 
@@ -667,7 +645,8 @@ public class AlertNotificationService {
                 detail);
 
         try {
-            alertNotifier.send(message);
+            alertNotifier.send(withProfileHeader(message));
+            markSent(category, subject, detail);
         } catch (Exception e) {
             log.error("发送{}失败，channel={}, subject={}, detail={}",
                     category,
@@ -683,6 +662,44 @@ public class AlertNotificationService {
             return "";
         }
         return value.replaceAll("\\s+", " ").trim();
+    }
+
+    private boolean allowSend(String category, String subject, String detail) {
+        if (notificationCooldownMs <= 0L) {
+            return true;
+        }
+
+        long currentTime = System.currentTimeMillis();
+        purgeExpiredSentRecords(currentTime);
+        String recordKey = dedupRecordKey(category, subject, detail);
+        Long lastSentTime = sentRecords.get(recordKey);
+        return lastSentTime == null || currentTime - lastSentTime > notificationCooldownMs;
+    }
+
+    private void purgeExpiredSentRecords(long currentTime) {
+        sentRecords.entrySet().removeIf(entry -> currentTime - entry.getValue() > notificationCooldownMs);
+    }
+
+    private void markSent(String category, String subject, String detail) {
+        if (notificationCooldownMs <= 0L) {
+            return;
+        }
+        sentRecords.put(dedupRecordKey(category, subject, detail), System.currentTimeMillis());
+    }
+
+    private String dedupRecordKey(String category, String subject, String detail) {
+        return cleanText(category) + "|" + cleanText(subject) + "|" + cleanText(detail);
+    }
+
+    private NotificationMessage withProfileHeader(NotificationMessage message) {
+        if (!StringUtils.hasText(profileLabel)) {
+            return message;
+        }
+        String header = "[" + profileLabel.trim() + "]\n";
+        return new NotificationMessage(
+                header + defaultText(message.markdownContent(), ""),
+                header + defaultText(message.plainTextContent(), "")
+        );
     }
 
     private String abbreviate(String value, int maxLength) {
@@ -785,6 +802,15 @@ public class AlertNotificationService {
         if (signal.getType().startsWith("EXIT_SCALE_OUT")) {
             return "若已按前序信号进场，当前应先兑现部分利润，并把剩余仓位按新的防守位继续管理。";
         }
+        if (signal.getType().startsWith("EXIT_CONFLICT_REDUCE")) {
+            return "若已按前序信号进场，当前更适合先减仓降暴露，而不是被小周期反向信号带着直接反手。";
+        }
+        if (signal.getType().startsWith("EXIT_CONFLICT_TIGHTEN_STOP")) {
+            return "若已按前序信号进场，当前更适合先把止损收紧到新的防守位，优先保护已有利润或控制回吐。";
+        }
+        if (signal.getType().startsWith("EXIT_CONFLICT_CLOSE")) {
+            return "若已按前序信号进场，当前更适合直接结束剩余仓位，重新等待与高一级别背景一致的机会。";
+        }
         if (signal.getType().startsWith("EXIT_TARGET")) {
             return "若已按前序信号进场，计划目标已命中，当前应优先完成止盈。";
         }
@@ -806,6 +832,15 @@ public class AlertNotificationService {
         }
         if (signal.getType().startsWith("EXIT_SCALE_OUT")) {
             return "价格到达首个 1R 减仓位，按计划先兑现部分利润。";
+        }
+        if (signal.getType().startsWith("EXIT_CONFLICT_REDUCE")) {
+            return "当前执行级别出现了与高一级别背景相冲突的反向信号，先减仓通常比直接反手更符合大局。";
+        }
+        if (signal.getType().startsWith("EXIT_CONFLICT_TIGHTEN_STOP")) {
+            return "高低周期开始出现方向分歧，顺势接受度可能减弱，因此应先收紧防守位。";
+        }
+        if (signal.getType().startsWith("EXIT_CONFLICT_CLOSE")) {
+            return "高低周期冲突已经升级，继续硬扛的性价比下降，优先平掉剩余仓位更稳妥。";
         }
         if (signal.getType().startsWith("EXIT_TARGET")) {
             return "价格已经到达预设止盈目标。";

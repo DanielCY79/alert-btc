@@ -130,6 +130,74 @@ class CompositeFactorSignalPolicyTests {
         assertTrue(decision.signal().getContextComment().contains("市场状态=趋势"));
     }
 
+    @Test
+    void shouldAllowAlignedExecutionSignalWithHigherTimeframeTrend() {
+        CompositeFactorSignalPolicy policy = createExecutionPolicy();
+        AlertSignal signal = pullbackLongSignal();
+        FeatureSnapshot snapshot = snapshot(
+                new BigDecimal("0.35"),
+                new BigDecimal("0.28"),
+                BigDecimal.ZERO,
+                BigDecimal.ZERO,
+                new BigDecimal("0.10"),
+                true,
+                0,
+                MarketState.PULLBACK
+        );
+        snapshot.setContextSnapshot(contextSnapshot("4h", MarketState.TREND, new BigDecimal("0.70"), new BigDecimal("0.20")));
+
+        SignalPolicyDecision decision = policy.evaluate(signal, snapshot);
+
+        assertTrue(decision.allowed());
+        assertTrue(decision.reasons().stream().anyMatch(reason -> reason.startsWith("HigherTF(4h)=")));
+        assertTrue(decision.reasons().contains("HigherTF bias=LONG"));
+    }
+
+    @Test
+    void shouldBlockCounterTrendExecutionSignalAgainstHigherTimeframeBias() {
+        CompositeFactorSignalPolicy policy = createExecutionPolicy();
+        AlertSignal signal = breakoutShortSignal();
+        FeatureSnapshot snapshot = snapshot(
+                new BigDecimal("-0.20"),
+                new BigDecimal("0.10"),
+                BigDecimal.ZERO,
+                BigDecimal.ZERO,
+                new BigDecimal("0.10"),
+                true,
+                0,
+                MarketState.BREAKOUT
+        );
+        snapshot.setContextSnapshot(contextSnapshot("4h", MarketState.TREND, new BigDecimal("0.75"), new BigDecimal("0.30")));
+
+        SignalPolicyDecision decision = policy.evaluate(signal, snapshot);
+
+        assertFalse(decision.allowed());
+        assertTrue(decision.reasons().stream().anyMatch(reason -> reason.startsWith("HigherTF(4h)=")));
+        assertTrue(decision.reasons().contains("HigherTF bias=LONG"));
+        assertTrue(decision.reasons().stream().anyMatch(reason -> reason.contains("bias LONG rejects SHORT")));
+    }
+
+    @Test
+    void shouldRequireHigherTimeframeContextForExecutionProfile() {
+        CompositeFactorSignalPolicy policy = createExecutionPolicy();
+        AlertSignal signal = breakoutLongSignal();
+        FeatureSnapshot snapshot = snapshot(
+                new BigDecimal("0.40"),
+                new BigDecimal("0.35"),
+                BigDecimal.ZERO,
+                BigDecimal.ZERO,
+                new BigDecimal("0.10"),
+                true,
+                0,
+                MarketState.BREAKOUT
+        );
+
+        SignalPolicyDecision decision = policy.evaluate(signal, snapshot);
+
+        assertFalse(decision.allowed());
+        assertTrue(decision.reasons().contains("Block: missing higher-timeframe context"));
+    }
+
     private CompositeFactorSignalPolicy createPolicy() {
         CompositeFactorSignalPolicy policy = new CompositeFactorSignalPolicy();
         ReflectionTestUtils.setField(policy, "enabled", true);
@@ -163,6 +231,15 @@ class CompositeFactorSignalPolicyTests {
         return policy;
     }
 
+    private CompositeFactorSignalPolicy createExecutionPolicy() {
+        CompositeFactorSignalPolicy policy = createPolicy();
+        ReflectionTestUtils.setField(policy, "multiTimeframeRole", "execution");
+        ReflectionTestUtils.setField(policy, "multiTimeframeConflictPolicy", "context-first");
+        ReflectionTestUtils.setField(policy, "allowCountertrendEntry", false);
+        ReflectionTestUtils.setField(policy, "requireExecutionContext", true);
+        return policy;
+    }
+
     private AlertSignal breakoutLongSignal() {
         BinanceKlineDTO kline = baseKline();
         return new AlertSignal(
@@ -190,6 +267,36 @@ class CompositeFactorSignalPolicyTests {
                 new BigDecimal("98.00"),
                 new BigDecimal("106.00"),
                 new BigDecimal("1.10")
+        );
+    }
+
+    private AlertSignal pullbackLongSignal() {
+        BinanceKlineDTO kline = baseKline();
+        return new AlertSignal(
+                TradeDirection.LONG,
+                "BTC breakout pullback long",
+                kline,
+                "BREAKOUT_PULLBACK_LONG",
+                "pullback retest in trend",
+                new BigDecimal("107.00"),
+                new BigDecimal("104.00"),
+                new BigDecimal("114.00"),
+                new BigDecimal("1.20")
+        );
+    }
+
+    private AlertSignal breakoutShortSignal() {
+        BinanceKlineDTO kline = baseKline();
+        return new AlertSignal(
+                TradeDirection.SHORT,
+                "BTC confirmed breakout short",
+                kline,
+                "CONFIRMED_BREAKOUT_SHORT",
+                "breakdown short",
+                new BigDecimal("99.00"),
+                new BigDecimal("103.00"),
+                new BigDecimal("92.00"),
+                new BigDecimal("1.30")
         );
     }
 
@@ -237,6 +344,23 @@ class CompositeFactorSignalPolicyTests {
         snapshot.setQuality(quality);
         snapshot.setMarketState(marketState);
         snapshot.setMarketStateComment("测试状态");
+        return snapshot;
+    }
+    private FeatureSnapshot contextSnapshot(String interval,
+                                            MarketState marketState,
+                                            BigDecimal trendBias,
+                                            BigDecimal breakoutConfirmation) {
+        FeatureSnapshot snapshot = snapshot(
+                trendBias,
+                breakoutConfirmation,
+                BigDecimal.ZERO,
+                BigDecimal.ZERO,
+                new BigDecimal("0.10"),
+                true,
+                0,
+                marketState
+        );
+        snapshot.setInterval(interval);
         return snapshot;
     }
 }
