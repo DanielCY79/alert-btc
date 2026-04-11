@@ -1,6 +1,6 @@
 package com.mobai.alert.state.signal;
 
-import com.mobai.alert.access.binance.kline.dto.BinanceKlineDTO;
+import com.mobai.alert.access.kline.dto.BinanceKlineDTO;
 
 import java.math.BigDecimal;
 

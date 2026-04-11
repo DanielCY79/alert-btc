@@ -1,6 +1,6 @@
 package com.mobai.alert.access.event.service;
 
-import com.mobai.alert.access.binance.cms.dto.BinanceAnnouncementDTO;
+import com.mobai.alert.access.event.binance.cms.dto.BinanceAnnouncementDTO;
 import com.mobai.alert.access.event.dto.MarketEventDTO;
 import com.mobai.alert.access.event.dto.SocialEventDTO;
 import org.junit.jupiter.api.Test;

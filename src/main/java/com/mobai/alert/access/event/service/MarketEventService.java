@@ -1,6 +1,6 @@
 package com.mobai.alert.access.event.service;
 
-import com.mobai.alert.access.binance.cms.dto.BinanceAnnouncementDTO;
+import com.mobai.alert.access.event.binance.cms.dto.BinanceAnnouncementDTO;
 import com.mobai.alert.access.event.dto.MarketEventDTO;
 import com.mobai.alert.access.event.dto.SocialEventDTO;
 import org.slf4j.Logger;
@@ -19,7 +19,10 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
- * 缁熶竴浜嬩欢绠￠亾銆? * 鐢ㄤ簬鎶?CMS 鍏憡鍜屾湭鏉ュ叾浠?social_event 鏁版嵁婧愭暣鐞嗘垚缁熶竴浜嬩欢缁撴瀯銆? */
+ * 市场事件标准化服务。
+ * 负责把 Binance 公告和外部文本事件统一解析为标准市场事件，
+ * 并补充实体识别、事件分类、情绪判断、新颖度和置信度等辅助字段。
+ */
 @Service
 public class MarketEventService {
 
@@ -28,10 +31,28 @@ public class MarketEventService {
     private static final Pattern ENTITY_TOKEN_PATTERN = Pattern.compile("\\b(BTC|BITCOIN|ETH|ETHEREUM|SOL|SOLANA|BNB|BINANCE|SEC|ETF)\\b", Pattern.CASE_INSENSITIVE);
     private static final long EVENT_RETENTION_MS = 7L * 24 * 60 * 60 * 1000;
 
+    /**
+     * 保护事件队列的监视器对象。
+     */
     private final Object monitor = new Object();
+
+    /**
+     * 近期事件队列，用于查询最近事件和计算新颖度。
+     */
     private final Deque<MarketEventDTO> recentEvents = new ArrayDeque<>();
+
+    /**
+     * 事件提及计数器。
+     * key 由实体、事件类型和来源拼接而成，用于估算短期提及速度。
+     */
     private final Map<String, Integer> mentionCounts = new ConcurrentHashMap<>();
 
+    /**
+     * 将 Binance CMS 公告转换并写入标准事件流。
+     *
+     * @param announcement Binance 公告
+     * @return 标准化后的市场事件；若输入为空则返回 {@code null}
+     */
     public MarketEventDTO ingestBinanceAnnouncement(BinanceAnnouncementDTO announcement) {
         if (announcement == null) {
             return null;
@@ -53,6 +74,12 @@ public class MarketEventService {
         return event;
     }
 
+    /**
+     * 将通用社交事件转换并写入标准事件流。
+     *
+     * @param socialEvent 社交文本事件
+     * @return 标准化后的市场事件；若输入为空或缺少正文则返回 {@code null}
+     */
     public MarketEventDTO ingestSocialEvent(SocialEventDTO socialEvent) {
         if (socialEvent == null || !StringUtils.hasText(socialEvent.getRawText())) {
             return null;
@@ -69,6 +96,11 @@ public class MarketEventService {
         return event;
     }
 
+    /**
+     * 获取当前保留窗口内的所有事件快照。
+     *
+     * @return 最近事件列表的只读副本
+     */
     public List<MarketEventDTO> getRecentEvents() {
         synchronized (monitor) {
             cleanupExpiredLocked();
@@ -76,6 +108,9 @@ public class MarketEventService {
         }
     }
 
+    /**
+     * 根据原始文本构建标准事件对象。
+     */
     private MarketEventDTO buildEvent(Instant eventTime, String source, String rawText, double sourceQuality) {
         String normalizedText = normalize(rawText);
         String entity = detectEntity(normalizedText);
@@ -98,6 +133,9 @@ public class MarketEventService {
         return event;
     }
 
+    /**
+     * 将事件写入近期缓存并记录日志。
+     */
     private void store(MarketEventDTO event) {
         if (event == null) {
             return;
@@ -106,7 +144,7 @@ public class MarketEventService {
             cleanupExpiredLocked();
             recentEvents.addLast(event);
         }
-        log.info("甯傚満浜嬩欢鍏ュ簱锛宼ime={}锛宻ource={}锛宔ntity={}锛宔ventType={}锛宻entiment={}锛宯ovelty={}锛宑onfidence={}锛宺awText={}",
+        log.info("市场事件已入库，time={}，source={}，entity={}，eventType={}，sentiment={}，novelty={}，confidence={}，rawText={}",
                 event.getEventTime(),
                 event.getSource(),
                 event.getEntity(),
@@ -117,6 +155,9 @@ public class MarketEventService {
                 event.getRawText());
     }
 
+    /**
+     * 清理过期事件，只能在持有 monitor 锁时调用。
+     */
     private void cleanupExpiredLocked() {
         Instant threshold = Instant.now().minusMillis(EVENT_RETENTION_MS);
         while (!recentEvents.isEmpty() && recentEvents.peekFirst().getEventTime().isBefore(threshold)) {
@@ -124,6 +165,9 @@ public class MarketEventService {
         }
     }
 
+    /**
+     * 尝试从文本中识别主实体或主币种。
+     */
     private String detectEntity(String rawText) {
         Matcher cashtagMatcher = CASHTAG_PATTERN.matcher(rawText);
         if (cashtagMatcher.find()) {
@@ -158,6 +202,9 @@ public class MarketEventService {
         return "MARKET";
     }
 
+    /**
+     * 根据关键词推断事件类型。
+     */
     private String detectEventType(String rawText) {
         String text = normalize(rawText);
         if (containsAny(text, "delist", "delisting", "remove")) {
@@ -181,6 +228,9 @@ public class MarketEventService {
         return "news";
     }
 
+    /**
+     * 基于事件类型和关键词给出粗粒度情绪判断。
+     */
     private String detectSentiment(String rawText, String eventType) {
         String text = normalize(rawText);
         if ("listing".equals(eventType) || "partnership".equals(eventType)) {
@@ -201,6 +251,9 @@ public class MarketEventService {
         return "neutral";
     }
 
+    /**
+     * 根据与近期事件的重复程度计算新颖度。
+     */
     private double calculateNovelty(String rawText) {
         String fingerprint = fingerprint(rawText);
         int similarCount = 0;
@@ -214,6 +267,9 @@ public class MarketEventService {
         return similarCount == 0 ? 1.0 : 1.0 / (similarCount + 1);
     }
 
+    /**
+     * 综合实体识别结果、事件类型、情绪和源质量估算置信度。
+     */
     private double calculateConfidence(String entity, String eventType, String sentiment, double sourceQuality) {
         double confidence = sourceQuality;
         if (!"MARKET".equals(entity)) {
@@ -228,6 +284,9 @@ public class MarketEventService {
         return Math.min(1.0, confidence);
     }
 
+    /**
+     * 生成用于重复判断的文本指纹。
+     */
     private String fingerprint(String rawText) {
         String normalized = normalize(rawText)
                 .replaceAll("https?://\\S+", "")
@@ -256,6 +315,9 @@ public class MarketEventService {
         return value.trim().replaceAll("\\s+", " ");
     }
 
+    /**
+     * 将若干文本片段拼接成一段完整原文。
+     */
     private String join(String... values) {
         StringBuilder builder = new StringBuilder();
         for (String value : values) {
@@ -270,4 +332,3 @@ public class MarketEventService {
         return builder.toString();
     }
 }
-

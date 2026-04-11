@@ -1,7 +1,7 @@
 package com.mobai.alert.strategy.backtest;
 
-import com.mobai.alert.access.binance.kline.dto.BinanceKlineDTO;
-import com.mobai.alert.access.facade.BinanceApi;
+import com.mobai.alert.access.kline.dto.BinanceKlineDTO;
+import com.mobai.alert.access.BinanceApi;
 import com.mobai.alert.state.backtest.BacktestConfig;
 import com.mobai.alert.state.backtest.BacktestReport;
 import com.mobai.alert.state.backtest.BatchBacktestResult;

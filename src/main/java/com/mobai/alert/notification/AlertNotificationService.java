@@ -1,7 +1,8 @@
 package com.mobai.alert.notification;
 
-import com.mobai.alert.access.binance.cms.dto.BinanceAnnouncementDTO;
-import com.mobai.alert.access.binance.kline.dto.BinanceKlineDTO;
+import com.mobai.alert.access.event.binance.cms.dto.BinanceAnnouncementDTO;
+import com.mobai.alert.access.kline.dto.BinanceKlineDTO;
+import com.mobai.alert.access.event.dto.MarketEventDTO;
 import com.mobai.alert.notification.channel.AlertNotifier;
 import com.mobai.alert.notification.model.NotificationMessage;
 import com.mobai.alert.state.signal.AlertSignal;
@@ -58,6 +59,17 @@ public class AlertNotificationService {
         String recordKey = "announcement:" + publishDate + ":" + title;
         NotificationMessage message = buildAnnouncementMessage(announcement);
         send(recordKey, message, "announcement", announcement.getTopic(), title);
+    }
+
+    public void sendMarketEvent(MarketEventDTO event, String title, String url) {
+        if (event == null) {
+            return;
+        }
+        String normalizedTitle = StringUtils.hasText(title) ? title : event.getRawText();
+        long eventTime = event.getEventTime() == null ? 0L : event.getEventTime().toEpochMilli();
+        String recordKey = "market-event:" + event.getSource() + ":" + eventTime + ":" + normalizedTitle;
+        NotificationMessage message = buildMarketEventMessage(event, normalizedTitle, url);
+        send(recordKey, message, "market event", event.getSource(), normalizedTitle);
     }
 
     @Scheduled(fixedDelay = 5 * 60 * 1000L)
@@ -170,6 +182,53 @@ public class AlertNotificationService {
         return new NotificationMessage(markdownBuilder.toString(), plainTextBuilder.toString());
     }
 
+    private NotificationMessage buildMarketEventMessage(MarketEventDTO event, String title, String url) {
+        LocalDateTime publishTime = event.getEventTime() == null
+                ? LocalDateTime.now()
+                : LocalDateTime.ofInstant(event.getEventTime(), ZoneId.systemDefault());
+        String source = StringUtils.hasText(event.getSource()) ? event.getSource() : "market_event";
+        String cleanTitle = StringUtils.hasText(title) ? title : "Market Event";
+        String rawText = abbreviate(cleanText(event.getRawText()), 900);
+
+        StringBuilder markdownBuilder = new StringBuilder()
+                .append("Market Event\n")
+                .append("> Source: ").append(source).append("\n")
+                .append("> Published: ").append(MESSAGE_TIME_FORMATTER.format(publishTime)).append("\n")
+                .append("> Title: ").append(cleanTitle).append("\n")
+                .append("> Entity: ").append(defaultText(event.getEntity(), "MARKET")).append("\n")
+                .append("> Event Type: ").append(defaultText(event.getEventType(), "news")).append("\n")
+                .append("> Sentiment: ").append(defaultText(event.getSentiment(), "neutral")).append("\n")
+                .append("> Confidence: ").append(formatNullableScore(event.getConfidence())).append("\n")
+                .append("> Novelty: ").append(formatNullableScore(event.getNovelty())).append("\n")
+                .append("> Mention Velocity: ").append(formatNullableScore(event.getMentionVelocity())).append("\n");
+        if (StringUtils.hasText(rawText)) {
+            markdownBuilder.append("> Summary: ").append(rawText).append("\n");
+        }
+        if (StringUtils.hasText(url)) {
+            markdownBuilder.append("[Open Article](").append(url).append(")");
+        }
+
+        StringBuilder plainTextBuilder = new StringBuilder()
+                .append("Market Event\n")
+                .append("Source: ").append(source).append("\n")
+                .append("Published: ").append(MESSAGE_TIME_FORMATTER.format(publishTime)).append("\n")
+                .append("Title: ").append(cleanTitle).append("\n")
+                .append("Entity: ").append(defaultText(event.getEntity(), "MARKET")).append("\n")
+                .append("Event Type: ").append(defaultText(event.getEventType(), "news")).append("\n")
+                .append("Sentiment: ").append(defaultText(event.getSentiment(), "neutral")).append("\n")
+                .append("Confidence: ").append(formatNullableScore(event.getConfidence())).append("\n")
+                .append("Novelty: ").append(formatNullableScore(event.getNovelty())).append("\n")
+                .append("Mention Velocity: ").append(formatNullableScore(event.getMentionVelocity())).append("\n");
+        if (StringUtils.hasText(rawText)) {
+            plainTextBuilder.append("Summary: ").append(rawText).append("\n");
+        }
+        if (StringUtils.hasText(url)) {
+            plainTextBuilder.append("Open Article: ").append(url);
+        }
+
+        return new NotificationMessage(markdownBuilder.toString(), plainTextBuilder.toString());
+    }
+
     private String buildChartUrl(String symbol, String interval) {
         return "https://www.binance.com/en/futures/"
                 + symbol
@@ -203,6 +262,13 @@ public class AlertNotificationService {
             return "-";
         }
         return ratio.setScale(2, RoundingMode.HALF_UP) + "x";
+    }
+
+    private String formatNullableScore(Double score) {
+        if (score == null) {
+            return "-";
+        }
+        return BigDecimal.valueOf(score).setScale(2, RoundingMode.HALF_UP).toPlainString();
     }
 
     private String normalizeChannelName(String channelName) {
@@ -269,6 +335,10 @@ public class AlertNotificationService {
             return value;
         }
         return value.substring(0, Math.max(0, maxLength - 3)) + "...";
+    }
+
+    private String defaultText(String value, String fallback) {
+        return StringUtils.hasText(value) ? value : fallback;
     }
 }
 

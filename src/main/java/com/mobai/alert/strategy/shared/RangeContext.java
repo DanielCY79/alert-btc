@@ -1,6 +1,6 @@
 package com.mobai.alert.strategy.shared;
 
-import com.mobai.alert.access.binance.kline.dto.BinanceKlineDTO;
+import com.mobai.alert.access.kline.dto.BinanceKlineDTO;
 
 import java.math.BigDecimal;
 import java.util.List;

@@ -1,6 +1,6 @@
 package com.mobai.alert.strategy.breakout;
 
-import com.mobai.alert.access.binance.kline.dto.BinanceKlineDTO;
+import com.mobai.alert.access.kline.dto.BinanceKlineDTO;
 import com.mobai.alert.state.signal.AlertSignal;
 import com.mobai.alert.state.signal.TradeDirection;
 import com.mobai.alert.strategy.shared.RangeContext;
