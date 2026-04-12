@@ -1,6 +1,7 @@
 package com.mobai.alert.control;
 
 import com.mobai.alert.state.backtest.BatchBacktestResult;
+import com.mobai.alert.strategy.backtest.BacktestExcelExportService;
 import com.mobai.alert.strategy.backtest.StrategyBacktestService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -22,11 +23,14 @@ public class BacktestRunner implements ApplicationRunner {
     private static final Logger log = LoggerFactory.getLogger(BacktestRunner.class);
 
     private final StrategyBacktestService strategyBacktestService;
+    private final BacktestExcelExportService backtestExcelExportService;
     private final ConfigurableApplicationContext applicationContext;
 
     public BacktestRunner(StrategyBacktestService strategyBacktestService,
+                          BacktestExcelExportService backtestExcelExportService,
                           ConfigurableApplicationContext applicationContext) {
         this.strategyBacktestService = strategyBacktestService;
+        this.backtestExcelExportService = backtestExcelExportService;
         this.applicationContext = applicationContext;
     }
 
@@ -37,6 +41,14 @@ public class BacktestRunner implements ApplicationRunner {
     public void run(ApplicationArguments args) {
         log.info("Backtest job started");
         BatchBacktestResult result = strategyBacktestService.runDefaultBacktestBatch();
+        backtestExcelExportService.exportIfEnabled(result).ifPresent(outcome ->
+                log.info("Backtest capital summary: rawFinalEquity={} USDT, policyFinalEquity={} USDT, policyReturn={}%, policyMaxDrawdown={} USDT ({}%), workbook={}",
+                        outcome.rawSimulation().finalEquity().setScale(2, java.math.RoundingMode.HALF_UP).toPlainString(),
+                        outcome.policySimulation().finalEquity().setScale(2, java.math.RoundingMode.HALF_UP).toPlainString(),
+                        outcome.policySimulation().totalReturnPct().setScale(2, java.math.RoundingMode.HALF_UP).toPlainString(),
+                        outcome.policySimulation().maxDrawdownAmount().setScale(2, java.math.RoundingMode.HALF_UP).toPlainString(),
+                        outcome.policySimulation().maxDrawdownPct().setScale(2, java.math.RoundingMode.HALF_UP).toPlainString(),
+                        outcome.outputPath()));
         log.info("Backtest job finished:\n{}", strategyBacktestService.formatBatchResult(result));
         SpringApplication.exit(applicationContext, () -> 0);
     }

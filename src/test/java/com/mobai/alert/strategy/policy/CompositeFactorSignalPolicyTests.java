@@ -198,6 +198,29 @@ class CompositeFactorSignalPolicyTests {
         assertTrue(decision.reasons().contains("Block: missing higher-timeframe context"));
     }
 
+    @Test
+    void shouldAllowMissingHigherTimeframeContextDuringStartupGracePeriod() {
+        CompositeFactorSignalPolicy policy = createExecutionPolicy();
+        ReflectionTestUtils.setField(policy, "executionContextGracePeriodMs", 60_000L);
+
+        AlertSignal signal = breakoutLongSignal();
+        FeatureSnapshot snapshot = snapshot(
+                new BigDecimal("0.40"),
+                new BigDecimal("0.35"),
+                BigDecimal.ZERO,
+                BigDecimal.ZERO,
+                new BigDecimal("0.10"),
+                true,
+                0,
+                MarketState.BREAKOUT
+        );
+
+        SignalPolicyDecision decision = policy.evaluate(signal, snapshot);
+
+        assertTrue(decision.allowed());
+        assertTrue(decision.reasons().contains("降级：启动宽限期内允许缺少高周期上下文"));
+    }
+
     private CompositeFactorSignalPolicy createPolicy() {
         CompositeFactorSignalPolicy policy = new CompositeFactorSignalPolicy();
         ReflectionTestUtils.setField(policy, "enabled", true);

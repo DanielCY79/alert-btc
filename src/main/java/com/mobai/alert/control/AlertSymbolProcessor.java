@@ -29,6 +29,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 import java.math.BigDecimal;
+import java.util.stream.Collectors;
 
 /**
  * 单个交易对的监控执行器。
@@ -56,6 +57,15 @@ public class AlertSymbolProcessor {
 
     @Value("${monitoring.multi-timeframe.context-kline-limit:0}")
     private int contextKlineLimit;
+
+    @Value("${monitoring.multi-timeframe.execution.require-context:false}")
+    private boolean requireExecutionContext;
+
+    @Value("${monitoring.multi-timeframe.execution.context-warmup-enabled:true}")
+    private boolean executionContextWarmupEnabled;
+
+    @Value("${monitoring.multi-timeframe.execution.context-grace-period-ms:0}")
+    private long executionContextGracePeriodMs;
 
     @Value("${monitoring.strategy.breakout.record.ttl.ms:43200000}")
     private long breakoutRecordTtlMs;
@@ -108,6 +118,10 @@ public class AlertSymbolProcessor {
     private final Map<String, BreakoutRecord> breakoutRecords = new ConcurrentHashMap<>();
     private final Map<String, MarketState> marketStates = new ConcurrentHashMap<>();
     private final Map<String, RuntimePosition> activePositions = new ConcurrentHashMap<>();
+    private final Map<String, String> contextLogStates = new ConcurrentHashMap<>();
+    private final Map<String, String> blockedSignalLogStates = new ConcurrentHashMap<>();
+    private final Map<String, Long> contextWarmupReadyAt = new ConcurrentHashMap<>();
+    private long processorStartedAt = System.currentTimeMillis();
 
     public AlertSymbolProcessor(BinanceApi binanceApi,
                                 AlertRuleEvaluator alertRuleEvaluator,
@@ -130,6 +144,8 @@ public class AlertSymbolProcessor {
         if (shouldSkip(symbol)) {
             return;
         }
+
+        ensureExecutionContextWarmup(symbol);
 
         log.info("Processing symbol={}, interval={}, limit={}",
                 symbol,
@@ -222,6 +238,13 @@ public class AlertSymbolProcessor {
         }
     }
 
+    public void prepareExecutionContext(String symbol) {
+        if (shouldSkip(symbol)) {
+            return;
+        }
+        ensureExecutionContextWarmup(symbol);
+    }
+
     /**
      * 周期清理已过期的突破记忆。
      */
@@ -276,12 +299,7 @@ public class AlertSymbolProcessor {
             if (tryHandleBlockedCounterTrendSignal(rawSignal, decision, featureSnapshot)) {
                 return true;
             }
-            log.info("Signal blocked by composite policy, symbol={}, signalType={}, direction={}, score={}, reasons={}",
-                    rawSignal.getKline().getSymbol(),
-                    rawSignal.getType(),
-                    rawSignal.getDirection(),
-                    StrategySupport.scaleOrNull(decision.score()),
-                    String.join(" | ", decision.reasons()));
+            logBlockedSignal("策略信号", rawSignal, decision, featureSnapshot);
             return false;
         }
 
@@ -475,12 +493,7 @@ public class AlertSymbolProcessor {
 
         SignalPolicyDecision decision = compositeFactorSignalPolicy.evaluate(followThroughSignal.get(), featureSnapshot);
         if (!decision.allowed()) {
-            log.info("Confirmed breakout blocked by composite policy, symbol={}, signalType={}, direction={}, score={}, reasons={}",
-                    followThroughSignal.get().getKline().getSymbol(),
-                    followThroughSignal.get().getType(),
-                    followThroughSignal.get().getDirection(),
-                    StrategySupport.scaleOrNull(decision.score()),
-                    String.join(" | ", decision.reasons()));
+            logBlockedSignal("确认突破", followThroughSignal.get(), decision, featureSnapshot);
             return true;
         }
 
@@ -564,6 +577,9 @@ public class AlertSymbolProcessor {
         FeatureSnapshot contextSnapshot = loadContextSnapshot(symbol);
         if (contextSnapshot != null) {
             executionSnapshot.setContextSnapshot(contextSnapshot);
+            rememberExecutionContextAvailable(symbol, contextSnapshot);
+        } else if (isExecutionRole() && requireExecutionContext) {
+            logExecutionContextMissing(symbol, executionSnapshot);
         }
         marketFeatureSnapshotService.rememberLatestSnapshot(executionSnapshot);
         return executionSnapshot;
@@ -577,16 +593,18 @@ public class AlertSymbolProcessor {
         int resolvedLimit = contextKlineLimit > 0 ? contextKlineLimit : klineLimit;
         List<BinanceKlineDTO> contextKlines = loadRecentKlines(symbol, contextInterval, resolvedLimit);
         if (CollectionUtils.isEmpty(contextKlines) || contextKlines.size() < 3) {
-            log.warn("Skip higher timeframe context, symbol={}, executionInterval={}, contextInterval={}, count={}",
-                    symbol,
-                    klineInterval,
-                    contextInterval,
-                    contextKlines == null ? 0 : contextKlines.size());
+            FeatureSnapshot cachedContextSnapshot = tryReuseWarmupContextSnapshot(symbol);
+            if (cachedContextSnapshot != null) {
+                logHigherTimeframeWarmupFallback(symbol, cachedContextSnapshot, resolvedLimit, contextKlines);
+                return cachedContextSnapshot;
+            }
+            logHigherTimeframeContextUnavailable(symbol, resolvedLimit, contextKlines);
             return null;
         }
 
         FeatureSnapshot contextSnapshot = marketFeatureSnapshotService.buildSnapshot(symbol, contextInterval, contextKlines);
         applyMarketState(symbol, contextInterval, contextSnapshot);
+        logHigherTimeframeContextReady(symbol, resolvedLimit, contextKlines, contextSnapshot);
         return contextSnapshot;
     }
 
@@ -614,6 +632,40 @@ public class AlertSymbolProcessor {
 
     private boolean isExecutionRole() {
         return "execution".equalsIgnoreCase(multiTimeframeRole);
+    }
+
+    private void ensureExecutionContextWarmup(String symbol) {
+        if (!shouldWarmupExecutionContext(symbol) || contextWarmupReadyAt.containsKey(contextWarmupKey(symbol))) {
+            return;
+        }
+
+        FeatureSnapshot contextSnapshot = loadContextSnapshot(symbol);
+        if (contextSnapshot == null) {
+            logContextWarmupPending(symbol);
+            return;
+        }
+
+        contextWarmupReadyAt.put(contextWarmupKey(symbol), System.currentTimeMillis());
+        logContextWarmupReady(symbol, contextSnapshot);
+    }
+
+    private boolean shouldWarmupExecutionContext(String symbol) {
+        return executionContextWarmupEnabled
+                && isExecutionRole()
+                && StringUtils.hasText(symbol)
+                && StringUtils.hasText(contextInterval)
+                && !contextInterval.equalsIgnoreCase(klineInterval);
+    }
+
+    private FeatureSnapshot tryReuseWarmupContextSnapshot(String symbol) {
+        if (!isWithinExecutionContextGracePeriod()) {
+            return null;
+        }
+        FeatureSnapshot cachedSnapshot = marketFeatureSnapshotService.getLatestSnapshot(symbol, contextInterval);
+        if (cachedSnapshot == null || !contextInterval.equalsIgnoreCase(cachedSnapshot.getInterval())) {
+            return null;
+        }
+        return cachedSnapshot;
     }
 
     private String stateKey(String symbol, String interval) {
@@ -648,6 +700,412 @@ public class AlertSymbolProcessor {
                 featureSnapshot.getQuality().isPriceReady(),
                 featureSnapshot.getQuality().isDerivativeReady(),
                 featureSnapshot.getQuality().getRelevantEventCount());
+    }
+
+    private void logHigherTimeframeContextUnavailable(String symbol,
+                                                      int requestedLimit,
+                                                      List<BinanceKlineDTO> contextKlines) {
+        String fingerprint = "unavailable|limit=" + requestedLimit
+                + "|raw=" + (contextKlines == null ? 0 : contextKlines.size())
+                + "|closed=" + countClosedKlines(contextKlines)
+                + "|latestEndTime=" + latestEndTime(contextKlines)
+                + "|required=" + requireExecutionContext
+                + "|graceActive=" + isWithinExecutionContextGracePeriod()
+                + "|graceRemainingMs=" + executionContextGraceRemainingMs();
+        if (!shouldLogContextStateChange(contextStatusKey(symbol), fingerprint)) {
+            return;
+        }
+        log.warn("高周期上下文不可用，symbol={}, 执行周期={}, 高周期={}, 请求K线数={}, 原始K线数={}, 已收线数={}, 最新结束时间={}, 要求高周期上下文={}, 启动宽限期生效={}, 宽限期剩余毫秒={}",
+                symbol,
+                klineInterval,
+                defaultText(contextInterval),
+                requestedLimit,
+                contextKlines == null ? 0 : contextKlines.size(),
+                countClosedKlines(contextKlines),
+                latestEndTime(contextKlines),
+                requireExecutionContext,
+                isWithinExecutionContextGracePeriod(),
+                executionContextGraceRemainingMs());
+    }
+
+    private void logHigherTimeframeContextReady(String symbol,
+                                                int requestedLimit,
+                                                List<BinanceKlineDTO> contextKlines,
+                                                FeatureSnapshot contextSnapshot) {
+        String fingerprint = "ready|limit=" + requestedLimit
+                + "|raw=" + (contextKlines == null ? 0 : contextKlines.size())
+                + "|closed=" + countClosedKlines(contextKlines)
+                + "|latestEndTime=" + latestEndTime(contextKlines)
+                + "|state=" + marketStateLabel(contextSnapshot == null ? null : contextSnapshot.getMarketState())
+                + "|asOfTime=" + (contextSnapshot == null ? null : contextSnapshot.getAsOfTime());
+        if (!shouldLogContextStateChange(contextStatusKey(symbol), fingerprint)) {
+            return;
+        }
+        log.info("高周期上下文已就绪，symbol={}, 执行周期={}, 高周期={}, 请求K线数={}, 原始K线数={}, 已收线数={}, 最新结束时间={}, 快照={}",
+                symbol,
+                klineInterval,
+                defaultText(contextInterval),
+                requestedLimit,
+                contextKlines == null ? 0 : contextKlines.size(),
+                countClosedKlines(contextKlines),
+                latestEndTime(contextKlines),
+                describeSnapshot(contextSnapshot));
+    }
+
+    private void rememberExecutionContextAvailable(String symbol, FeatureSnapshot contextSnapshot) {
+        String fingerprint = "available|context=" + defaultText(contextInterval)
+                + "|state=" + marketStateLabel(contextSnapshot == null ? null : contextSnapshot.getMarketState())
+                + "|asOfTime=" + (contextSnapshot == null ? null : contextSnapshot.getAsOfTime());
+        shouldLogContextStateChange(executionContextKey(symbol), fingerprint);
+        if (contextSnapshot != null) {
+            contextWarmupReadyAt.put(contextWarmupKey(symbol), System.currentTimeMillis());
+        }
+    }
+
+    private void logExecutionContextMissing(String symbol, FeatureSnapshot executionSnapshot) {
+        String fingerprint = "missing|context=" + defaultText(contextInterval)
+                + "|executionState=" + marketStateLabel(executionSnapshot == null ? null : executionSnapshot.getMarketState())
+                + "|graceActive=" + isWithinExecutionContextGracePeriod()
+                + "|graceRemainingMs=" + executionContextGraceRemainingMs();
+        if (!shouldLogContextStateChange(executionContextKey(symbol), fingerprint)) {
+            return;
+        }
+        log.warn("执行周期快照缺少高周期上下文，symbol={}, 执行周期={}, 高周期={}, 要求高周期上下文={}, 启动宽限期生效={}, 宽限期剩余毫秒={}, 执行快照={}",
+                symbol,
+                klineInterval,
+                defaultText(contextInterval),
+                requireExecutionContext,
+                isWithinExecutionContextGracePeriod(),
+                executionContextGraceRemainingMs(),
+                describeSnapshot(executionSnapshot));
+    }
+
+    private void logContextWarmupReady(String symbol, FeatureSnapshot contextSnapshot) {
+        String fingerprint = "warmup-ready|asOfTime=" + (contextSnapshot == null ? null : contextSnapshot.getAsOfTime())
+                + "|state=" + marketStateLabel(contextSnapshot == null ? null : contextSnapshot.getMarketState());
+        if (!shouldLogContextStateChange(contextWarmupKey(symbol), fingerprint)) {
+            return;
+        }
+        log.info("启动预热高周期上下文完成，symbol={}, 执行周期={}, 高周期={}, 宽限期毫秒={}, 快照={}",
+                symbol,
+                klineInterval,
+                defaultText(contextInterval),
+                executionContextGracePeriodMs,
+                describeSnapshot(contextSnapshot));
+    }
+
+    private void logContextWarmupPending(String symbol) {
+        String fingerprint = "warmup-pending|graceActive=" + isWithinExecutionContextGracePeriod()
+                + "|graceRemainingMs=" + executionContextGraceRemainingMs();
+        if (!shouldLogContextStateChange(contextWarmupKey(symbol), fingerprint)) {
+            return;
+        }
+        log.warn("启动预热高周期上下文未完成，symbol={}, 执行周期={}, 高周期={}, 启动宽限期生效={}, 宽限期剩余毫秒={}",
+                symbol,
+                klineInterval,
+                defaultText(contextInterval),
+                isWithinExecutionContextGracePeriod(),
+                executionContextGraceRemainingMs());
+    }
+
+    private void logHigherTimeframeWarmupFallback(String symbol,
+                                                  FeatureSnapshot cachedSnapshot,
+                                                  int requestedLimit,
+                                                  List<BinanceKlineDTO> contextKlines) {
+        String fingerprint = "warmup-fallback|limit=" + requestedLimit
+                + "|raw=" + (contextKlines == null ? 0 : contextKlines.size())
+                + "|closed=" + countClosedKlines(contextKlines)
+                + "|cachedAsOfTime=" + (cachedSnapshot == null ? null : cachedSnapshot.getAsOfTime())
+                + "|cachedState=" + marketStateLabel(cachedSnapshot == null ? null : cachedSnapshot.getMarketState());
+        if (!shouldLogContextStateChange(contextFallbackKey(symbol), fingerprint)) {
+            return;
+        }
+        log.warn("高周期上下文拉取未就绪，启动宽限期内回退到已预热快照，symbol={}, 执行周期={}, 高周期={}, 请求K线数={}, 原始K线数={}, 已收线数={}, 宽限期剩余毫秒={}, 预热快照={}",
+                symbol,
+                klineInterval,
+                defaultText(contextInterval),
+                requestedLimit,
+                contextKlines == null ? 0 : contextKlines.size(),
+                countClosedKlines(contextKlines),
+                executionContextGraceRemainingMs(),
+                describeSnapshot(cachedSnapshot));
+    }
+
+    private void logBlockedSignal(String stage,
+                                  AlertSignal signal,
+                                  SignalPolicyDecision decision,
+                                  FeatureSnapshot featureSnapshot) {
+        String symbol = signal != null && signal.getKline() != null
+                ? defaultText(signal.getKline().getSymbol())
+                : "-";
+        String signalType = signal == null ? "-" : defaultText(signal.getType());
+        Object direction = signal == null ? "-" : signal.getDirection();
+        String directionLabel = signal == null ? "-" : tradeDirectionLabel(signal.getDirection());
+        Object score = decision == null ? "-" : StrategySupport.scaleOrNull(decision.score());
+        String reasons = describeDecisionReasons(decision);
+        String blockCategory = isMissingHigherTimeframeContextBlock(decision)
+                ? "missing-context"
+                : (isHigherTimeframeContextBlock(decision) ? "higher-context" : "composite");
+        String blockFingerprint = blockCategory
+                + "|reasons=" + reasons
+                + "|executionState=" + marketStateLabel(featureSnapshot == null ? null : featureSnapshot.getMarketState())
+                + "|higherState=" + marketStateLabel(featureSnapshot == null || featureSnapshot.getContextSnapshot() == null
+                ? null
+                : featureSnapshot.getContextSnapshot().getMarketState())
+                + "|higherAsOfTime=" + (featureSnapshot == null || featureSnapshot.getContextSnapshot() == null
+                ? null
+                : featureSnapshot.getContextSnapshot().getAsOfTime());
+        if (!shouldLogBlockedSignalStateChange(blockedSignalLogKey(symbol, stage, signalType, direction), blockFingerprint)) {
+            return;
+        }
+
+        if (isMissingHigherTimeframeContextBlock(decision)) {
+            log.warn("{}因缺少高周期上下文被拦截，symbol={}, 信号类型={}, 方向={}, 评分={}, 执行周期={}, 高周期={}, 请求高周期K线数={}, 执行快照={}, 高周期快照={}, 原因={}",
+                    stage,
+                    symbol,
+                    signalType,
+                    directionLabel,
+                    score,
+                    klineInterval,
+                    defaultText(contextInterval),
+                    resolvedContextLimit(),
+                    describeSnapshot(featureSnapshot),
+                    describeContextSnapshot(featureSnapshot),
+                    reasons);
+            return;
+        }
+
+        if (isHigherTimeframeContextBlock(decision)) {
+            log.info("{}被高周期上下文拦截，symbol={}, 信号类型={}, 方向={}, 评分={}, 执行周期={}, 高周期={}, 执行快照={}, 高周期快照={}, 原因={}",
+                    stage,
+                    symbol,
+                    signalType,
+                    directionLabel,
+                    score,
+                    klineInterval,
+                    defaultText(contextInterval),
+                    describeSnapshot(featureSnapshot),
+                    describeContextSnapshot(featureSnapshot),
+                    reasons);
+            return;
+        }
+
+        log.info("{}被复合因子策略拦截，symbol={}, 信号类型={}, 方向={}, 评分={}, 执行快照={}, 高周期快照={}, 原因={}",
+                stage,
+                symbol,
+                signalType,
+                directionLabel,
+                score,
+                describeSnapshot(featureSnapshot),
+                describeContextSnapshot(featureSnapshot),
+                reasons);
+    }
+
+    private boolean isMissingHigherTimeframeContextBlock(SignalPolicyDecision decision) {
+        return decision != null
+                && decision.reasons() != null
+                && decision.reasons().contains("Block: missing higher-timeframe context");
+    }
+
+    private boolean isHigherTimeframeContextBlock(SignalPolicyDecision decision) {
+        if (decision == null || decision.allowed() || decision.reasons() == null || decision.reasons().isEmpty()) {
+            return false;
+        }
+        boolean hasHigherTimeframeReason = decision.reasons().stream().anyMatch(reason -> reason.startsWith("HigherTF("));
+        boolean hasBlockingReason = decision.reasons().stream().anyMatch(reason -> reason.startsWith("Block: "));
+        return hasHigherTimeframeReason && hasBlockingReason;
+    }
+
+    private int resolvedContextLimit() {
+        return contextKlineLimit > 0 ? contextKlineLimit : klineLimit;
+    }
+
+    private String contextStatusKey(String symbol) {
+        return stateKey(symbol, defaultText(contextInterval)) + ":context-status";
+    }
+
+    private String executionContextKey(String symbol) {
+        return stateKey(symbol, klineInterval) + ":execution-context";
+    }
+
+    private String blockedSignalLogKey(String symbol, String stage, String signalType, Object direction) {
+        return stateKey(symbol, klineInterval) + ":blocked:" + stage + ":" + signalType + ":" + String.valueOf(direction);
+    }
+
+    private String contextWarmupKey(String symbol) {
+        return stateKey(symbol, defaultText(contextInterval)) + ":context-warmup";
+    }
+
+    private String contextFallbackKey(String symbol) {
+        return stateKey(symbol, defaultText(contextInterval)) + ":context-fallback";
+    }
+
+    private boolean shouldLogContextStateChange(String key, String fingerprint) {
+        String normalizedFingerprint = defaultText(fingerprint);
+        String previous = contextLogStates.put(key, normalizedFingerprint);
+        return !normalizedFingerprint.equals(previous);
+    }
+
+    private boolean shouldLogBlockedSignalStateChange(String key, String fingerprint) {
+        String normalizedFingerprint = defaultText(fingerprint);
+        String previous = blockedSignalLogStates.put(key, normalizedFingerprint);
+        return !normalizedFingerprint.equals(previous);
+    }
+
+    private String describeContextSnapshot(FeatureSnapshot featureSnapshot) {
+        FeatureSnapshot contextSnapshot = featureSnapshot == null ? null : featureSnapshot.getContextSnapshot();
+        return describeSnapshot(contextSnapshot);
+    }
+
+    private String describeSnapshot(FeatureSnapshot snapshot) {
+        if (snapshot == null) {
+            return "缺失";
+        }
+        return "周期=" + defaultText(snapshot.getInterval())
+                + ", 对应时间=" + snapshot.getAsOfTime()
+                + ", 市场状态=" + marketStateLabel(snapshot.getMarketState())
+                + ", 原始K线数=" + rawKlineCount(snapshot)
+                + ", 已收线数=" + closedKlineCount(snapshot)
+                + ", 趋势偏置=" + compositeFactorValue(snapshot, true)
+                + ", 突破确认=" + compositeFactorValue(snapshot, false)
+                + ", 状态说明=" + defaultText(snapshot.getMarketStateComment());
+    }
+
+    private Object compositeFactorValue(FeatureSnapshot snapshot, boolean trendBias) {
+        if (snapshot == null || snapshot.getCompositeFactors() == null) {
+            return "-";
+        }
+        return trendBias
+                ? StrategySupport.scaleOrNull(snapshot.getCompositeFactors().getTrendBiasScore())
+                : StrategySupport.scaleOrNull(snapshot.getCompositeFactors().getBreakoutConfirmationScore());
+    }
+
+    private int rawKlineCount(FeatureSnapshot snapshot) {
+        return snapshot == null || snapshot.getQuality() == null || snapshot.getQuality().getRawKlineCount() == null
+                ? 0
+                : snapshot.getQuality().getRawKlineCount();
+    }
+
+    private int closedKlineCount(FeatureSnapshot snapshot) {
+        return snapshot == null || snapshot.getQuality() == null || snapshot.getQuality().getClosedKlineCount() == null
+                ? 0
+                : snapshot.getQuality().getClosedKlineCount();
+    }
+
+    private int countClosedKlines(List<BinanceKlineDTO> klines) {
+        return CollectionUtils.isEmpty(klines) ? 0 : StrategySupport.closedKlines(klines).size();
+    }
+
+    private Long latestEndTime(List<BinanceKlineDTO> klines) {
+        return CollectionUtils.isEmpty(klines) ? null : StrategySupport.last(klines).getEndTime();
+    }
+
+    private String marketStateLabel(MarketState marketState) {
+        return marketState == null ? "-" : marketState.label();
+    }
+
+    private boolean isWithinExecutionContextGracePeriod() {
+        if (!requireExecutionContext || executionContextGracePeriodMs <= 0) {
+            return false;
+        }
+        return System.currentTimeMillis() - processorStartedAt <= executionContextGracePeriodMs;
+    }
+
+    private long executionContextGraceRemainingMs() {
+        if (!isWithinExecutionContextGracePeriod()) {
+            return 0L;
+        }
+        return Math.max(0L, executionContextGracePeriodMs - (System.currentTimeMillis() - processorStartedAt));
+    }
+
+    private String describeDecisionReasons(SignalPolicyDecision decision) {
+        if (decision == null || decision.reasons() == null || decision.reasons().isEmpty()) {
+            return "-";
+        }
+        return decision.reasons().stream()
+                .map(this::translateDecisionReason)
+                .collect(Collectors.joining(" | "));
+    }
+
+    private String translateDecisionReason(String reason) {
+        if (!StringUtils.hasText(reason)) {
+            return "-";
+        }
+        if ("Block: missing higher-timeframe context".equals(reason)) {
+            return "拦截：缺少高周期上下文";
+        }
+        if ("Block: higher-timeframe conflict".equals(reason)) {
+            return "拦截：高周期冲突";
+        }
+        if (reason.startsWith("HigherTF(")) {
+            int equalsIndex = reason.indexOf(")=");
+            if (equalsIndex > "HigherTF(".length()) {
+                String interval = reason.substring("HigherTF(".length(), equalsIndex);
+                String state = reason.substring(equalsIndex + 2);
+                return "高周期(" + interval + ")状态=" + defaultText(state);
+            }
+            return reason.replace("HigherTF", "高周期");
+        }
+        if (reason.startsWith("HigherTF bias=")) {
+            String bias = reason.substring("HigherTF bias=".length());
+            return "高周期方向偏置=" + translateDirectionLabel(bias);
+        }
+        if (reason.startsWith("Block: ")) {
+            String body = reason.substring("Block: ".length());
+            String rangeSuffix = " range context only accepts range-failure entries";
+            if (body.endsWith(rangeSuffix)) {
+                String interval = body.substring(0, body.length() - rangeSuffix.length());
+                return "拦截：" + interval + " 区间上下文仅接受区间失败反转信号";
+            }
+            String contextRejectMarker = " context rejects ";
+            int contextRejectIndex = body.indexOf(contextRejectMarker);
+            if (contextRejectIndex > 0) {
+                String interval = body.substring(0, contextRejectIndex);
+                String signalFamily = body.substring(contextRejectIndex + contextRejectMarker.length());
+                return "拦截：" + interval + " 上下文拒绝 " + signalFamily;
+            }
+            String biasMarker = " bias ";
+            String rejectMarker = " rejects ";
+            int biasIndex = body.indexOf(biasMarker);
+            int rejectIndex = body.indexOf(rejectMarker);
+            if (biasIndex > 0 && rejectIndex > biasIndex) {
+                String interval = body.substring(0, biasIndex);
+                String contextBias = body.substring(biasIndex + biasMarker.length(), rejectIndex);
+                String rejectedDetail = body.substring(rejectIndex + rejectMarker.length());
+                int firstSpace = rejectedDetail.indexOf(' ');
+                if (firstSpace > 0) {
+                    String signalDirection = rejectedDetail.substring(0, firstSpace);
+                    String signalFamily = rejectedDetail.substring(firstSpace + 1);
+                    return "拦截：" + interval + " 偏置="
+                            + translateDirectionLabel(contextBias)
+                            + "，拒绝 "
+                            + translateDirectionLabel(signalDirection)
+                            + signalFamily;
+                }
+                return "拦截：" + interval + " 偏置=" + translateDirectionLabel(contextBias) + "，拒绝 " + rejectedDetail;
+            }
+            return "拦截：" + body;
+        }
+        return reason;
+    }
+
+    private String tradeDirectionLabel(TradeDirection direction) {
+        return direction == null ? "-" : translateDirectionLabel(direction.name());
+    }
+
+    private String translateDirectionLabel(String direction) {
+        if (!StringUtils.hasText(direction)) {
+            return "-";
+        }
+        return switch (direction) {
+            case "LONG" -> "做多";
+            case "SHORT" -> "做空";
+            default -> direction;
+        };
+    }
+
+    private String defaultText(String value) {
+        return StringUtils.hasText(value) ? value : "-";
     }
 
     private boolean sendExitIfPresent(String symbol, List<BinanceKlineDTO> klines) {

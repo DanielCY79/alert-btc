@@ -114,6 +114,90 @@ class AlertSymbolProcessorMultiTimeframeTests {
         verify(snapshotService).rememberLatestSnapshot(executionSnapshot);
     }
 
+    @Test
+    void shouldReusePrewarmedHigherTimeframeSnapshotDuringStartupGracePeriod() {
+        BinanceApi binanceApi = mock(BinanceApi.class);
+        AlertRuleEvaluator evaluator = mock(AlertRuleEvaluator.class);
+        AlertNotificationService notificationService = mock(AlertNotificationService.class);
+        MarketFeatureSnapshotService snapshotService = mock(MarketFeatureSnapshotService.class);
+        CompositeFactorSignalPolicy policy = mock(CompositeFactorSignalPolicy.class);
+        MarketStateMachine marketStateMachine = mock(MarketStateMachine.class);
+
+        AlertSymbolProcessor processor = new AlertSymbolProcessor(
+                binanceApi,
+                evaluator,
+                notificationService,
+                snapshotService,
+                policy,
+                marketStateMachine
+        );
+        ReflectionTestUtils.setField(processor, "targetSymbol", "BTCUSDT");
+        ReflectionTestUtils.setField(processor, "klineInterval", "3m");
+        ReflectionTestUtils.setField(processor, "klineLimit", 120);
+        ReflectionTestUtils.setField(processor, "multiTimeframeRole", "execution");
+        ReflectionTestUtils.setField(processor, "contextInterval", "4h");
+        ReflectionTestUtils.setField(processor, "contextKlineLimit", 60);
+        ReflectionTestUtils.setField(processor, "requireExecutionContext", true);
+        ReflectionTestUtils.setField(processor, "executionContextWarmupEnabled", true);
+        ReflectionTestUtils.setField(processor, "executionContextGracePeriodMs", 60_000L);
+
+        List<BinanceKlineDTO> executionKlines = executionKlines();
+        List<BinanceKlineDTO> validContextKlines = contextKlines();
+        List<BinanceKlineDTO> insufficientContextKlines = validContextKlines.subList(0, 2);
+        when(binanceApi.listKline(any())).thenAnswer(invocation -> {
+            BinanceKlineDTO request = invocation.getArgument(0);
+            if ("4h".equals(request.getInterval())) {
+                return ((java.util.Map<?, ?>) ReflectionTestUtils.getField(processor, "contextWarmupReadyAt")).isEmpty()
+                        ? validContextKlines
+                        : insufficientContextKlines;
+            }
+            return executionKlines;
+        });
+
+        FeatureSnapshot executionSnapshot = snapshot("3m", new BigDecimal("0.20"), new BigDecimal("0.15"));
+        FeatureSnapshot contextSnapshot = snapshot("4h", new BigDecimal("0.75"), new BigDecimal("0.30"));
+        when(snapshotService.buildSnapshot(eq("BTCUSDT"), eq("3m"), anyList())).thenReturn(executionSnapshot);
+        when(snapshotService.buildSnapshot(eq("BTCUSDT"), eq("4h"), anyList())).thenReturn(contextSnapshot);
+        when(snapshotService.getLatestSnapshot("BTCUSDT", "4h")).thenReturn(contextSnapshot);
+        when(marketStateMachine.evaluate(eq(executionSnapshot), any())).thenReturn(new MarketStateDecision(MarketState.PULLBACK, "3m pullback"));
+        when(marketStateMachine.evaluate(eq(contextSnapshot), any())).thenReturn(new MarketStateDecision(MarketState.TREND, "4h trend"));
+
+        AlertSignal signal = new AlertSignal(
+                TradeDirection.LONG,
+                "3m pullback long",
+                executionKlines.get(executionKlines.size() - 1),
+                "BREAKOUT_PULLBACK_LONG",
+                "test",
+                new BigDecimal("100.50"),
+                new BigDecimal("99.20"),
+                new BigDecimal("103.50"),
+                new BigDecimal("1.10")
+        );
+        when(evaluator.evaluateRangeFailedBreakdownLong(executionKlines)).thenReturn(java.util.Optional.of(signal));
+
+        AtomicReference<FeatureSnapshot> capturedSnapshot = new AtomicReference<>();
+        when(policy.evaluate(eq(signal), any(FeatureSnapshot.class))).thenAnswer(invocation -> {
+            FeatureSnapshot snapshot = invocation.getArgument(1);
+            capturedSnapshot.set(snapshot);
+            return new SignalPolicyDecision(
+                    true,
+                    signal.withContext(new BigDecimal("0.72"), "ok"),
+                    new BigDecimal("0.72"),
+                    List.of("ok")
+            );
+        });
+
+        processor.prepareExecutionContext("BTCUSDT");
+        processor.process("BTCUSDT");
+
+        FeatureSnapshot policySnapshot = capturedSnapshot.get();
+        assertThat(policySnapshot).isNotNull();
+        assertThat(policySnapshot.getContextSnapshot()).isNotNull();
+        assertThat(policySnapshot.getContextSnapshot().getInterval()).isEqualTo("4h");
+        verify(snapshotService, times(1)).buildSnapshot(eq("BTCUSDT"), eq("4h"), anyList());
+        verify(notificationService).send(any(AlertSignal.class));
+    }
+
     private FeatureSnapshot snapshot(String interval, BigDecimal trendBias, BigDecimal breakoutConfirmation) {
         CompositeFactors compositeFactors = new CompositeFactors();
         compositeFactors.setTrendBiasScore(trendBias);

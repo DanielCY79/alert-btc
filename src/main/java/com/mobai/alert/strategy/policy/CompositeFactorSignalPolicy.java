@@ -120,6 +120,11 @@ public class CompositeFactorSignalPolicy {
     @Value("${monitoring.multi-timeframe.execution.require-context:false}")
     private boolean requireExecutionContext;
 
+    @Value("${monitoring.multi-timeframe.execution.context-grace-period-ms:0}")
+    private long executionContextGracePeriodMs;
+
+    private long policyStartedAt = System.currentTimeMillis();
+
     public CompositeFactorPolicyProfile currentProfile() {
         return new CompositeFactorPolicyProfile(
                 enabled,
@@ -347,6 +352,9 @@ public class CompositeFactorSignalPolicy {
         FeatureSnapshot contextSnapshot = snapshot == null ? null : snapshot.getContextSnapshot();
         if (contextSnapshot == null) {
             if (requireExecutionContext) {
+                if (isWithinExecutionContextGracePeriod()) {
+                    return ContextAlignmentDecision.allowed(List.of("降级：启动宽限期内允许缺少高周期上下文"));
+                }
                 return ContextAlignmentDecision.blocked(List.of("Block: missing higher-timeframe context"));
             }
             return ContextAlignmentDecision.allowed(List.of());
@@ -374,6 +382,13 @@ public class CompositeFactorSignalPolicy {
 
     private boolean isExecutionRole() {
         return "execution".equalsIgnoreCase(multiTimeframeRole);
+    }
+
+    private boolean isWithinExecutionContextGracePeriod() {
+        if (!requireExecutionContext || executionContextGracePeriodMs <= 0) {
+            return false;
+        }
+        return System.currentTimeMillis() - policyStartedAt <= executionContextGracePeriodMs;
     }
 
     private boolean isContextFirstPolicy() {
