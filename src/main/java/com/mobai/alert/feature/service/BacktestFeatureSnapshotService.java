@@ -9,7 +9,7 @@ import com.mobai.alert.feature.model.EventFeatures;
 import com.mobai.alert.feature.model.FeatureQuality;
 import com.mobai.alert.feature.model.FeatureSnapshot;
 import com.mobai.alert.feature.model.PriceFeatures;
-import com.mobai.alert.strategy.shared.StrategySupport;
+import com.mobai.alert.strategy.priceaction.shared.StrategySupport;
 import org.springframework.stereotype.Service;
 
 import java.util.List;

@@ -3,11 +3,12 @@ package com.mobai.alert.notification;
 import com.mobai.alert.access.event.binance.cms.dto.BinanceAnnouncementDTO;
 import com.mobai.alert.access.event.dto.MarketEventDTO;
 import com.mobai.alert.access.kline.dto.BinanceKlineDTO;
+import com.mobai.alert.strategy.config.StrategyMetadata;
 import com.mobai.alert.notification.channel.AlertNotifier;
 import com.mobai.alert.notification.model.NotificationMessage;
 import com.mobai.alert.notification.model.NotificationMessage.HeaderTemplate;
-import com.mobai.alert.state.signal.AlertSignal;
-import com.mobai.alert.state.signal.TradeDirection;
+import com.mobai.alert.strategy.model.AlertSignal;
+import com.mobai.alert.strategy.model.TradeDirection;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -43,6 +44,7 @@ public class AlertNotificationService {
     private final List<AlertNotifier> alertNotifiers;
     private final Map<String, AlertNotifier> notifierByChannel;
     private final Map<String, Long> sentRecords = new ConcurrentHashMap<>();
+    private final StrategyMetadata strategyMetadata;
 
     @Value("${notification.channel:feishu}")
     private String notificationChannel = "feishu";
@@ -50,11 +52,10 @@ public class AlertNotificationService {
     @Value("${notification.cooldown-ms:0}")
     private long notificationCooldownMs;
 
-    @Value("${monitoring.profile.label:}")
-    private String profileLabel = "";
-
-    public AlertNotificationService(List<AlertNotifier> alertNotifiers) {
+    public AlertNotificationService(List<AlertNotifier> alertNotifiers,
+                                    StrategyMetadata strategyMetadata) {
         this.alertNotifiers = alertNotifiers;
+        this.strategyMetadata = strategyMetadata;
         this.notifierByChannel = new ConcurrentHashMap<>();
         for (AlertNotifier alertNotifier : alertNotifiers) {
             notifierByChannel.put(normalizeChannelName(alertNotifier.channelName()), alertNotifier);
@@ -728,17 +729,19 @@ public class AlertNotificationService {
     }
 
     private String dedupRecordKey(String category, String subject, String detail) {
-        return cleanText(category) + "|" + cleanText(subject) + "|" + cleanText(detail);
+        return strategyMetadata.namespace(
+                cleanText(category) + "|" + cleanText(subject) + "|" + cleanText(detail)
+        );
     }
 
     private NotificationMessage withProfileHeader(NotificationMessage message) {
-        if (!StringUtils.hasText(profileLabel)) {
+        if (!StringUtils.hasText(strategyMetadata.label())) {
             return message;
         }
-        String header = "[" + profileLabel.trim() + "]\n";
+        String header = "[" + strategyMetadata.label() + "]\n";
         String nextCardTitle = StringUtils.hasText(message.cardTitle())
-                ? "[" + profileLabel.trim() + "] " + message.cardTitle()
-                : "[" + profileLabel.trim() + "] 通知提醒";
+                ? "[" + strategyMetadata.label() + "] " + message.cardTitle()
+                : "[" + strategyMetadata.label() + "] 通知提醒";
         return new NotificationMessage(
                 header + defaultText(message.markdownContent(), ""),
                 header + defaultText(message.plainTextContent(), ""),

@@ -65,6 +65,7 @@ class MarketFeatureSnapshotServiceTests {
         ));
 
         FeatureSnapshot snapshot = service.buildSnapshot("BTCUSDT", "4h", klines());
+        service.rememberLatestSnapshot("test-strategy", snapshot);
 
         assertThat(snapshot.getSymbol()).isEqualTo("BTCUSDT");
         assertThat(snapshot.getPriceFeatures()).isNotNull();
@@ -73,8 +74,8 @@ class MarketFeatureSnapshotServiceTests {
         assertThat(snapshot.getCompositeFactors().getCrowdingScore()).isNotNull();
         assertThat(snapshot.getQuality().isPriceReady()).isTrue();
         assertThat(snapshot.getQuality().isDerivativeReady()).isTrue();
-        assertThat(service.getLatestSnapshot("BTCUSDT")).isSameAs(snapshot);
-        assertThat(service.getLatestSnapshot("BTCUSDT", "4h")).isSameAs(snapshot);
+        assertThat(service.getLatestSnapshot("test-strategy", "BTCUSDT")).isSameAs(snapshot);
+        assertThat(service.getLatestSnapshot("test-strategy", "BTCUSDT", "4h")).isSameAs(snapshot);
     }
 
     /**

@@ -1,10 +1,11 @@
 package com.mobai.alert.notification;
 
 import com.mobai.alert.access.kline.dto.BinanceKlineDTO;
+import com.mobai.alert.strategy.config.StrategyMetadata;
 import com.mobai.alert.notification.channel.AlertNotifier;
 import com.mobai.alert.notification.model.NotificationMessage;
-import com.mobai.alert.state.signal.AlertSignal;
-import com.mobai.alert.state.signal.TradeDirection;
+import com.mobai.alert.strategy.model.AlertSignal;
+import com.mobai.alert.strategy.model.TradeDirection;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 import org.springframework.test.util.ReflectionTestUtils;
@@ -287,7 +288,7 @@ class AlertNotificationSignalContextTests {
     }
 
     private AlertNotificationService service(AlertNotifier notifier) {
-        AlertNotificationService service = new AlertNotificationService(List.of(notifier));
+        AlertNotificationService service = new AlertNotificationService(List.of(notifier), new StrategyMetadata("test-strategy", "", true));
         ReflectionTestUtils.setField(service, "notificationChannel", "feishu");
         return service;
     }

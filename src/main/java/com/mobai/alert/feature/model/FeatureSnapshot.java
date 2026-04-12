@@ -1,6 +1,6 @@
 package com.mobai.alert.feature.model;
 
-import com.mobai.alert.state.runtime.MarketState;
+import com.mobai.alert.strategy.model.MarketState;
 
 /**
  * 统一特征快照对象。

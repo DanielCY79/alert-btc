@@ -2,9 +2,9 @@ package com.mobai.alert.feature.extractor;
 
 import com.mobai.alert.access.kline.dto.BinanceKlineDTO;
 import com.mobai.alert.feature.model.PriceFeatures;
-import com.mobai.alert.strategy.shared.RangeContext;
-import com.mobai.alert.strategy.shared.StrategySettings;
-import com.mobai.alert.strategy.shared.StrategySupport;
+import com.mobai.alert.strategy.priceaction.shared.RangeContext;
+import com.mobai.alert.strategy.priceaction.shared.StrategySettings;
+import com.mobai.alert.strategy.priceaction.shared.StrategySupport;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 import org.springframework.util.CollectionUtils;

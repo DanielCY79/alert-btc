@@ -47,16 +47,16 @@ public class BinanceKlineWebSocketService {
     @Value("${monitoring.target-symbol:BTCUSDT}")
     private String targetSymbol;
 
-    @Value("${monitoring.kline.interval:15m}")
+    @Value("${monitoring.kline.interval:3m}")
     private String klineInterval;
 
     @Value("${monitoring.market-data.websocket.base-url:wss://fstream.binance.com/ws}")
     private String webSocketBaseUrl;
 
-    @Value("${monitoring.market-data.websocket.cache-size:${monitoring.kline.limit:80}}")
+    @Value("${monitoring.market-data.websocket.cache-size:${monitoring.kline.limit:360}}")
     private int cacheSize;
 
-    @Value("${monitoring.market-data.websocket.bootstrap-limit:${monitoring.kline.limit:80}}")
+    @Value("${monitoring.market-data.websocket.bootstrap-limit:${monitoring.kline.limit:360}}")
     private int bootstrapLimit;
 
     @Value("${monitoring.market-data.websocket.stale-threshold-ms:180000}")

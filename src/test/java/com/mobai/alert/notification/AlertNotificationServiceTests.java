@@ -1,6 +1,7 @@
 package com.mobai.alert.notification;
 
 import com.mobai.alert.access.event.dto.MarketEventDTO;
+import com.mobai.alert.strategy.config.StrategyMetadata;
 import com.mobai.alert.notification.channel.AlertNotifier;
 import com.mobai.alert.notification.model.NotificationMessage;
 import org.junit.jupiter.api.Test;
@@ -28,7 +29,7 @@ class AlertNotificationServiceTests {
     void shouldSendMarketEventMessageToSelectedChannel() {
         AlertNotifier notifier = mock(AlertNotifier.class);
         when(notifier.channelName()).thenReturn("feishu");
-        AlertNotificationService service = new AlertNotificationService(List.of(notifier));
+        AlertNotificationService service = new AlertNotificationService(List.of(notifier), new StrategyMetadata("test-strategy", "", true));
         ReflectionTestUtils.setField(service, "notificationChannel", "feishu");
 
         MarketEventDTO event = new MarketEventDTO();
@@ -54,7 +55,7 @@ class AlertNotificationServiceTests {
     void shouldThrottleDuplicateNotificationsWhenCooldownEnabled() {
         AlertNotifier notifier = mock(AlertNotifier.class);
         when(notifier.channelName()).thenReturn("feishu");
-        AlertNotificationService service = new AlertNotificationService(List.of(notifier));
+        AlertNotificationService service = new AlertNotificationService(List.of(notifier), new StrategyMetadata("test-strategy", "", true));
         ReflectionTestUtils.setField(service, "notificationChannel", "feishu");
         ReflectionTestUtils.setField(service, "notificationCooldownMs", 60_000L);
 
@@ -73,9 +74,8 @@ class AlertNotificationServiceTests {
     void shouldPrefixNotificationsWithProfileLabelWhenConfigured() {
         AlertNotifier notifier = mock(AlertNotifier.class);
         when(notifier.channelName()).thenReturn("feishu");
-        AlertNotificationService service = new AlertNotificationService(List.of(notifier));
+        AlertNotificationService service = new AlertNotificationService(List.of(notifier), new StrategyMetadata("test-strategy", "Intraday 3M", true));
         ReflectionTestUtils.setField(service, "notificationChannel", "feishu");
-        ReflectionTestUtils.setField(service, "profileLabel", "Intraday 3M");
 
         MarketEventDTO event = new MarketEventDTO();
         event.setSource("gdelt_doc");

@@ -53,25 +53,25 @@ public class BinanceDerivativeFeatureService {
     @Value("${monitoring.target-symbol:BTCUSDT}")
     private String targetSymbol;
 
-    @Value("${monitoring.market-data.derivatives.oi-window-ms:300000}")
+    @Value("${monitoring.market-data.derivatives.oi-window-ms:180000}")
     private long oiWindowMs;
 
     @Value("${monitoring.market-data.derivatives.funding-lookback:30}")
     private int fundingLookback;
 
-    @Value("${monitoring.market-data.derivatives.taker-period:5m}")
+    @Value("${monitoring.market-data.derivatives.taker-period:1m}")
     private String takerPeriod;
 
     @Value("${monitoring.market-data.derivatives.taker-limit:1}")
     private int takerLimit;
 
-    @Value("${monitoring.market-data.derivatives.ratio-period:5m}")
+    @Value("${monitoring.market-data.derivatives.ratio-period:1m}")
     private String ratioPeriod;
 
     @Value("${monitoring.market-data.derivatives.ratio-limit:2}")
     private int ratioLimit;
 
-    @Value("${monitoring.market-data.derivatives.liquidation-window-ms:300000}")
+    @Value("${monitoring.market-data.derivatives.liquidation-window-ms:180000}")
     private long liquidationWindowMs;
 
     public BinanceDerivativeFeatureService(BinanceDerivativeRestClient derivativeRestClient,

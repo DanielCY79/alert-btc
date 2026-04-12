@@ -14,8 +14,9 @@ import com.mobai.alert.feature.model.EventFeatures;
 import com.mobai.alert.feature.model.FeatureQuality;
 import com.mobai.alert.feature.model.FeatureSnapshot;
 import com.mobai.alert.feature.model.PriceFeatures;
-import com.mobai.alert.strategy.shared.StrategySupport;
+import com.mobai.alert.strategy.priceaction.shared.StrategySupport;
 import org.springframework.stereotype.Service;
+import org.springframework.util.StringUtils;
 
 import java.util.List;
 import java.util.Map;
@@ -72,27 +73,26 @@ public class MarketFeatureSnapshotService {
         snapshot.setEventFeatures(eventFeatures);
         snapshot.setCompositeFactors(compositeFactors);
         snapshot.setQuality(buildQuality(klines, priceFeatures, derivativeFeatures, eventFeatures));
-        rememberLatestSnapshot(snapshot);
         return snapshot;
     }
 
     /**
      * 返回缓存中的最近一次快照。
      */
-    public FeatureSnapshot getLatestSnapshot(String symbol) {
-        return latestSnapshots.get(symbol);
+    public FeatureSnapshot getLatestSnapshot(String strategyId, String symbol) {
+        return latestSnapshots.get(strategyScopedSymbolKey(strategyId, symbol));
     }
 
-    public FeatureSnapshot getLatestSnapshot(String symbol, String interval) {
-        return latestSnapshotsByInterval.get(snapshotKey(symbol, interval));
+    public FeatureSnapshot getLatestSnapshot(String strategyId, String symbol, String interval) {
+        return latestSnapshotsByInterval.get(snapshotKey(strategyId, symbol, interval));
     }
 
-    public void rememberLatestSnapshot(FeatureSnapshot snapshot) {
+    public void rememberLatestSnapshot(String strategyId, FeatureSnapshot snapshot) {
         if (snapshot == null || snapshot.getSymbol() == null || snapshot.getInterval() == null) {
             return;
         }
-        latestSnapshots.put(snapshot.getSymbol(), snapshot);
-        latestSnapshotsByInterval.put(snapshotKey(snapshot.getSymbol(), snapshot.getInterval()), snapshot);
+        latestSnapshots.put(strategyScopedSymbolKey(strategyId, snapshot.getSymbol()), snapshot);
+        latestSnapshotsByInterval.put(snapshotKey(strategyId, snapshot.getSymbol(), snapshot.getInterval()), snapshot);
     }
 
     /**
@@ -134,7 +134,12 @@ public class MarketFeatureSnapshotService {
                 || derivativeFeatures.getLiquidationClusterIntensity() != null;
     }
 
-    private String snapshotKey(String symbol, String interval) {
-        return symbol + "@" + interval;
+    private String snapshotKey(String strategyId, String symbol, String interval) {
+        return strategyScopedSymbolKey(strategyId, symbol) + "@" + interval;
+    }
+
+    private String strategyScopedSymbolKey(String strategyId, String symbol) {
+        String normalizedStrategyId = StringUtils.hasText(strategyId) ? strategyId.trim() : "default";
+        return normalizedStrategyId + "|" + symbol;
     }
 }
