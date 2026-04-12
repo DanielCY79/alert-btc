@@ -30,6 +30,27 @@ public class BollingerSignalEvaluator {
     @Value("${monitoring.strategy.boll.entry-volume-lookback:20}")
     private int entryVolumeLookback;
 
+    @Value("${monitoring.strategy.boll.context-trend-lookback-bars:3}")
+    private int contextTrendLookbackBars;
+
+    @Value("${monitoring.strategy.boll.context-min-middle-rise-pct:0.0020}")
+    private BigDecimal contextMinMiddleRisePct;
+
+    @Value("${monitoring.strategy.boll.context-min-close-buffer-pct:0.0015}")
+    private BigDecimal contextMinCloseBufferPct;
+
+    @Value("${monitoring.strategy.boll.context-bandwidth-lookback-bars:3}")
+    private int contextBandwidthLookbackBars;
+
+    @Value("${monitoring.strategy.boll.context-min-bandwidth-expansion-pct:0.0150}")
+    private BigDecimal contextMinBandwidthExpansionPct;
+
+    @Value("${monitoring.strategy.boll.fast-failure-max-bars:360}")
+    private int fastFailureMaxBars;
+
+    @Value("${monitoring.strategy.boll.fast-failure-loss-pct:0.0035}")
+    private BigDecimal fastFailureLossPct;
+
     public Optional<AlertSignal> evaluateLongEntry(List<BinanceKlineDTO> closedEntryKlines,
                                                    List<BinanceKlineDTO> closedContextKlines) {
         if (!hasEnoughBars(closedEntryKlines) || !hasEnoughBars(closedContextKlines)) {
@@ -47,6 +68,9 @@ public class BollingerSignalEvaluator {
         BigDecimal entryClose = BollingerSupport.valueOf(entryBar.getClose());
         BigDecimal contextClose = BollingerSupport.valueOf(contextBar.getClose());
         if (contextClose.compareTo(contextBands.middle()) <= 0) {
+            return Optional.empty();
+        }
+        if (!passesContextTrendFilter(closedContextKlines, contextBands, contextClose)) {
             return Optional.empty();
         }
         if (entryClose.compareTo(entryBands.middle()) < 0 || entryClose.compareTo(entryBands.upper()) > 0) {
@@ -67,7 +91,7 @@ public class BollingerSignalEvaluator {
                 null,
                 BollingerSupport.scaleOrNull(BollingerSupport.volumeRatio(closedEntryKlines, entryVolumeLookback)),
                 null,
-                buildEntryContext(entryClose, contextClose, entryBands, contextBands),
+                buildEntryContext(entryClose, contextClose, entryBands, contextBands, closedContextKlines),
                 BollingerSupport.scaleOrNull(entryClose),
                 BollingerSupport.scaleOrNull(stopPrice)
         ));
@@ -76,7 +100,8 @@ public class BollingerSignalEvaluator {
     public Optional<AlertSignal> evaluateLongExit(List<BinanceKlineDTO> closedEntryKlines,
                                                   List<BinanceKlineDTO> closedContextKlines,
                                                   BigDecimal entryPrice,
-                                                  BigDecimal stopPrice) {
+                                                  BigDecimal stopPrice,
+                                                  int heldBars) {
         if (!hasEnoughBars(closedEntryKlines) || !hasEnoughBars(closedContextKlines)) {
             return Optional.empty();
         }
@@ -91,6 +116,9 @@ public class BollingerSignalEvaluator {
         BinanceKlineDTO contextBar = BollingerSupport.last(closedContextKlines);
         BigDecimal entryClose = BollingerSupport.valueOf(entryBar.getClose());
         BigDecimal contextClose = BollingerSupport.valueOf(contextBar.getClose());
+        if (shouldFastFail(entryBands, entryClose, entryPrice, heldBars)) {
+            return Optional.of(buildFastFailureExitSignal(entryBar, closedEntryKlines, entryClose, entryPrice, stopPrice, entryBands));
+        }
         if (contextClose.compareTo(contextBands.middle()) >= 0) {
             return Optional.empty();
         }
@@ -121,6 +149,110 @@ public class BollingerSignalEvaluator {
         return stopLossPct;
     }
 
+    private boolean passesContextTrendFilter(List<BinanceKlineDTO> closedContextKlines,
+                                             BollingerBandLevels currentBands,
+                                             BigDecimal contextClose) {
+        BigDecimal closeBufferPct = BollingerSupport.ratio(
+                contextClose.subtract(currentBands.middle()),
+                currentBands.middle()
+        );
+        if (closeBufferPct.compareTo(nonNegative(contextMinCloseBufferPct)) < 0) {
+            return false;
+        }
+        if (contextTrendLookbackBars <= 0) {
+            return true;
+        }
+
+        BollingerBandLevels previousBands = BollingerSupport.calculateBandsAtOffset(
+                closedContextKlines,
+                bollPeriod,
+                stddevMultiplier,
+                contextTrendLookbackBars
+        );
+        if (previousBands == null) {
+            return false;
+        }
+        BigDecimal middleRisePct = BollingerSupport.ratio(
+                currentBands.middle().subtract(previousBands.middle()),
+                previousBands.middle()
+        );
+        if (middleRisePct.compareTo(nonNegative(contextMinMiddleRisePct)) < 0) {
+            return false;
+        }
+        return passesBandwidthExpansionFilter(closedContextKlines, currentBands);
+    }
+
+    private boolean passesBandwidthExpansionFilter(List<BinanceKlineDTO> closedContextKlines,
+                                                   BollingerBandLevels currentBands) {
+        if (contextBandwidthLookbackBars <= 0) {
+            return true;
+        }
+        BollingerBandLevels previousBands = BollingerSupport.calculateBandsAtOffset(
+                closedContextKlines,
+                bollPeriod,
+                stddevMultiplier,
+                contextBandwidthLookbackBars
+        );
+        if (previousBands == null) {
+            return false;
+        }
+        BigDecimal currentBandwidthPct = bandWidthPct(currentBands);
+        BigDecimal previousBandwidthPct = bandWidthPct(previousBands);
+        if (previousBandwidthPct.compareTo(BigDecimal.ZERO) <= 0) {
+            return false;
+        }
+        BigDecimal expansionPct = BollingerSupport.ratio(
+                currentBandwidthPct.subtract(previousBandwidthPct),
+                previousBandwidthPct
+        );
+        return expansionPct.compareTo(nonNegative(contextMinBandwidthExpansionPct)) >= 0;
+    }
+
+    private boolean shouldFastFail(BollingerBandLevels entryBands,
+                                   BigDecimal entryClose,
+                                   BigDecimal entryPrice,
+                                   int heldBars) {
+        if (fastFailureMaxBars <= 0 || heldBars <= 0 || heldBars > fastFailureMaxBars) {
+            return false;
+        }
+        if (entryPrice == null || entryPrice.compareTo(BigDecimal.ZERO) <= 0) {
+            return false;
+        }
+        if (entryClose.compareTo(entryBands.middle()) >= 0) {
+            return false;
+        }
+        BigDecimal lossPct = BollingerSupport.ratio(entryPrice.subtract(entryClose), entryPrice);
+        return lossPct.compareTo(nonNegative(fastFailureLossPct)) >= 0;
+    }
+
+    private AlertSignal buildFastFailureExitSignal(BinanceKlineDTO entryBar,
+                                                   List<BinanceKlineDTO> closedEntryKlines,
+                                                   BigDecimal entryClose,
+                                                   BigDecimal entryPrice,
+                                                   BigDecimal stopPrice,
+                                                   BollingerBandLevels entryBands) {
+        String summary = "The 1m follow-through failed quickly after entry and price slipped back under the Bollinger middle band. "
+                + "That usually marks a weak breakout rather than a trend worth holding.";
+        return new AlertSignal(
+                TradeDirection.LONG,
+                "4h/1m Bollinger Fast Failure Exit",
+                entryBar,
+                "EXIT_BOLLINGER_FAST_FAILURE_LONG",
+                summary,
+                BollingerSupport.scaleOrNull(entryClose),
+                BollingerSupport.scaleOrNull(stopPrice),
+                null,
+                BollingerSupport.scaleOrNull(BollingerSupport.volumeRatio(closedEntryKlines, entryVolumeLookback)),
+                null,
+                "entryPrice=" + scaled(entryPrice)
+                        + " | 1m close=" + scaled(entryClose)
+                        + " < mid=" + scaled(entryBands.middle())
+                        + " | quickLoss=" + percent(BollingerSupport.ratio(entryPrice.subtract(entryClose), entryPrice).multiply(ONE_HUNDRED)),
+                BollingerSupport.scaleOrNull(entryPrice),
+                BollingerSupport.scaleOrNull(stopPrice)
+        );
+    }
+
     private boolean hasEnoughBars(List<BinanceKlineDTO> closedKlines) {
         return !CollectionUtils.isEmpty(closedKlines) && closedKlines.size() >= bollPeriod;
     }
@@ -128,11 +260,53 @@ public class BollingerSignalEvaluator {
     private String buildEntryContext(BigDecimal entryClose,
                                      BigDecimal contextClose,
                                      BollingerBandLevels entryBands,
-                                     BollingerBandLevels contextBands) {
+                                     BollingerBandLevels contextBands,
+                                     List<BinanceKlineDTO> closedContextKlines) {
+        BigDecimal closeBufferPct = BollingerSupport.ratio(
+                contextClose.subtract(contextBands.middle()),
+                contextBands.middle()
+        ).multiply(ONE_HUNDRED);
+        BigDecimal middleRisePct = null;
+        BigDecimal bandwidthExpansionPct = null;
+        if (contextTrendLookbackBars > 0) {
+            BollingerBandLevels previousBands = BollingerSupport.calculateBandsAtOffset(
+                    closedContextKlines,
+                    bollPeriod,
+                    stddevMultiplier,
+                    contextTrendLookbackBars
+            );
+            if (previousBands != null) {
+                middleRisePct = BollingerSupport.ratio(
+                        contextBands.middle().subtract(previousBands.middle()),
+                        previousBands.middle()
+                ).multiply(ONE_HUNDRED);
+            }
+        }
+        if (contextBandwidthLookbackBars > 0) {
+            BollingerBandLevels previousBandwidthBands = BollingerSupport.calculateBandsAtOffset(
+                    closedContextKlines,
+                    bollPeriod,
+                    stddevMultiplier,
+                    contextBandwidthLookbackBars
+            );
+            if (previousBandwidthBands != null) {
+                BigDecimal currentBandwidthPct = bandWidthPct(contextBands);
+                BigDecimal previousBandwidthPct = bandWidthPct(previousBandwidthBands);
+                if (previousBandwidthPct.compareTo(BigDecimal.ZERO) > 0) {
+                    bandwidthExpansionPct = BollingerSupport.ratio(
+                            currentBandwidthPct.subtract(previousBandwidthPct),
+                            previousBandwidthPct
+                    ).multiply(ONE_HUNDRED);
+                }
+            }
+        }
         return "4h close=" + scaled(contextClose)
                 + " > mid=" + scaled(contextBands.middle())
                 + " | 1m close=" + scaled(entryClose)
                 + " within [" + scaled(entryBands.middle()) + ", " + scaled(entryBands.upper()) + "]"
+                + " | 4h closeBuffer=" + percent(closeBufferPct)
+                + " | 4h middleRise=" + percent(middleRisePct)
+                + " | 4h bandwidthExpansion=" + percent(bandwidthExpansionPct)
                 + " | stop=" + percent(stopLossPct.multiply(ONE_HUNDRED));
     }
 
@@ -152,5 +326,19 @@ public class BollingerSignalEvaluator {
 
     private String percent(BigDecimal value) {
         return value == null ? "-" : value.setScale(2, RoundingMode.HALF_UP).toPlainString() + "%";
+    }
+
+    private BigDecimal nonNegative(BigDecimal value) {
+        return value == null ? BigDecimal.ZERO : value.max(BigDecimal.ZERO);
+    }
+
+    private BigDecimal bandWidthPct(BollingerBandLevels bands) {
+        if (bands == null) {
+            return BigDecimal.ZERO;
+        }
+        return BollingerSupport.ratio(
+                bands.upper().subtract(bands.lower()),
+                bands.middle()
+        );
     }
 }

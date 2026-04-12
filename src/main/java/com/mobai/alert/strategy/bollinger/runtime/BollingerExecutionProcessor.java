@@ -43,10 +43,18 @@ public class BollingerExecutionProcessor implements StrategyExecutionProcessor {
     @Value("${monitoring.strategy.boll.context-kline-limit:80}")
     private int contextKlineLimit;
 
+    @Value("${monitoring.strategy.boll.reentry-cooldown-bars:240}")
+    private int reentryCooldownBars;
+
+    @Value("${monitoring.strategy.boll.max-entries-per-context-bar:1}")
+    private int maxEntriesPerContextBar;
+
     private final BinanceApi binanceApi;
     private final BollingerSignalEvaluator signalEvaluator;
     private final AlertNotificationService notificationService;
     private final Map<String, BollingerRuntimePosition> activePositions = new ConcurrentHashMap<>();
+    private final Map<String, Long> cooldownUntilTimes = new ConcurrentHashMap<>();
+    private final Map<String, ContextEntryWindow> contextEntryWindows = new ConcurrentHashMap<>();
 
     public BollingerExecutionProcessor(BinanceApi binanceApi,
                                        BollingerSignalEvaluator signalEvaluator,
@@ -74,29 +82,47 @@ public class BollingerExecutionProcessor implements StrategyExecutionProcessor {
 
         List<BinanceKlineDTO> closedEntryKlines = BollingerSupport.closedKlines(entryKlines);
         List<BinanceKlineDTO> closedContextKlines = BollingerSupport.closedKlines(contextKlines);
+        BinanceKlineDTO latestClosedEntryBar = CollectionUtils.isEmpty(closedEntryKlines)
+                ? null
+                : closedEntryKlines.get(closedEntryKlines.size() - 1);
+        BinanceKlineDTO latestClosedContextBar = CollectionUtils.isEmpty(closedContextKlines)
+                ? null
+                : closedContextKlines.get(closedContextKlines.size() - 1);
+        refreshContextEntryWindow(symbol, latestClosedContextBar);
         BollingerRuntimePosition activePosition = activePositions.get(symbol);
         if (activePosition != null) {
             Optional<AlertSignal> stopExit = buildStopExitSignal(entryKlines, closedEntryKlines, activePosition);
             if (stopExit.isPresent()) {
                 activePositions.remove(symbol);
+                maybeStartCooldown(symbol, activePosition, stopExit.get(), stopExit.get().getKline().getEndTime());
                 notificationService.send(stopExit.get());
                 return;
             }
+            int heldBars = heldBars(activePosition, latestClosedEntryBar);
             Optional<AlertSignal> reversalExit = signalEvaluator.evaluateLongExit(
                     closedEntryKlines,
                     closedContextKlines,
                     activePosition.entryPrice(),
-                    activePosition.stopPrice()
+                    activePosition.stopPrice(),
+                    heldBars
             );
             if (reversalExit.isPresent()) {
                 activePositions.remove(symbol);
+                maybeStartCooldown(symbol, activePosition, reversalExit.get(), reversalExit.get().getKline().getEndTime());
                 notificationService.send(reversalExit.get());
             }
             return;
         }
 
+        if (isCooldownActive(symbol, latestClosedEntryBar)) {
+            return;
+        }
+        if (hasReachedContextEntryLimit(symbol)) {
+            return;
+        }
         signalEvaluator.evaluateLongEntry(closedEntryKlines, closedContextKlines).ifPresent(signal -> {
             notificationService.send(signal);
+            consumeContextEntryBudget(symbol, latestClosedContextBar);
             activePositions.put(symbol, new BollingerRuntimePosition(
                     signal.getType(),
                     signal.getKline().getEndTime(),
@@ -117,6 +143,53 @@ public class BollingerExecutionProcessor implements StrategyExecutionProcessor {
         request.setLimit(limit);
         request.setTimeZone("8");
         return binanceApi.listKline(request);
+    }
+
+    private boolean isCooldownActive(String symbol, BinanceKlineDTO latestClosedEntryBar) {
+        if (reentryCooldownBars <= 0 || latestClosedEntryBar == null) {
+            return false;
+        }
+        Long cooldownUntilTime = cooldownUntilTimes.get(symbol);
+        if (cooldownUntilTime == null) {
+            return false;
+        }
+        if (latestClosedEntryBar.getEndTime() >= cooldownUntilTime) {
+            cooldownUntilTimes.remove(symbol);
+            return false;
+        }
+        return true;
+    }
+
+    private void refreshContextEntryWindow(String symbol, BinanceKlineDTO latestClosedContextBar) {
+        if (maxEntriesPerContextBar <= 0 || !StringUtils.hasText(symbol) || latestClosedContextBar == null) {
+            return;
+        }
+        contextEntryWindows.compute(symbol, (key, existing) -> {
+            if (existing == null || existing.contextBarEndTime() != latestClosedContextBar.getEndTime()) {
+                return new ContextEntryWindow(latestClosedContextBar.getEndTime(), 0);
+            }
+            return existing;
+        });
+    }
+
+    private boolean hasReachedContextEntryLimit(String symbol) {
+        if (maxEntriesPerContextBar <= 0 || !StringUtils.hasText(symbol)) {
+            return false;
+        }
+        ContextEntryWindow window = contextEntryWindows.get(symbol);
+        return window != null && window.entries() >= maxEntriesPerContextBar;
+    }
+
+    private void consumeContextEntryBudget(String symbol, BinanceKlineDTO latestClosedContextBar) {
+        if (maxEntriesPerContextBar <= 0 || !StringUtils.hasText(symbol) || latestClosedContextBar == null) {
+            return;
+        }
+        contextEntryWindows.compute(symbol, (key, existing) -> {
+            if (existing == null || existing.contextBarEndTime() != latestClosedContextBar.getEndTime()) {
+                return new ContextEntryWindow(latestClosedContextBar.getEndTime(), 1);
+            }
+            return new ContextEntryWindow(existing.contextBarEndTime(), existing.entries() + 1);
+        });
     }
 
     private Optional<AlertSignal> buildStopExitSignal(List<BinanceKlineDTO> rawEntryKlines,
@@ -159,5 +232,36 @@ public class BollingerExecutionProcessor implements StrategyExecutionProcessor {
                 BollingerSupport.scaleOrNull(activePosition.stopPrice())
         );
         return Optional.of(signal);
+    }
+
+    private int heldBars(BollingerRuntimePosition activePosition, BinanceKlineDTO latestClosedEntryBar) {
+        if (activePosition == null || latestClosedEntryBar == null) {
+            return 0;
+        }
+        long intervalMs = BollingerSupport.resolveIntervalMs(entryInterval);
+        long elapsedBars = Math.max(1L, (latestClosedEntryBar.getEndTime() - activePosition.signalTime()) / intervalMs);
+        return (int) Math.min(Integer.MAX_VALUE, elapsedBars);
+    }
+
+    private void maybeStartCooldown(String symbol,
+                                    BollingerRuntimePosition activePosition,
+                                    AlertSignal exitSignal,
+                                    long exitTime) {
+        if (reentryCooldownBars <= 0 || activePosition == null || exitSignal == null) {
+            return;
+        }
+        BigDecimal exitPrice = exitSignal.getTriggerPrice();
+        if (exitPrice == null || activePosition.entryPrice() == null) {
+            return;
+        }
+        if (exitPrice.compareTo(activePosition.entryPrice()) > 0) {
+            cooldownUntilTimes.remove(symbol);
+            return;
+        }
+        long cooldownDurationMs = (long) Math.max(1, reentryCooldownBars) * BollingerSupport.resolveIntervalMs(entryInterval);
+        cooldownUntilTimes.put(symbol, exitTime + cooldownDurationMs);
+    }
+
+    private record ContextEntryWindow(long contextBarEndTime, int entries) {
     }
 }

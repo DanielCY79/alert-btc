@@ -40,7 +40,8 @@ class BollingerSignalEvaluatorTests {
                 entryKlines,
                 contextKlines,
                 new BigDecimal("102.90"),
-                new BigDecimal("92.61")
+                new BigDecimal("92.61"),
+                400
         ).orElse(null);
 
         assertThat(signal).isNotNull();
@@ -49,12 +50,61 @@ class BollingerSignalEvaluatorTests {
         assertThat(signal.getReferenceStopPrice()).isEqualTo(new BigDecimal("92.61"));
     }
 
+    @Test
+    void shouldRejectLongSignalWhen4hTrendFilterIsTooWeak() {
+        BollingerSignalEvaluator strictEvaluator = evaluator();
+        ReflectionTestUtils.setField(strictEvaluator, "contextMinCloseBufferPct", new BigDecimal("0.0050"));
+
+        List<BinanceKlineDTO> entryKlines = trendingKlines("1m", 100.0, 0.10, 30);
+        List<BinanceKlineDTO> contextKlines = trendingKlines("4h", 100.0, 0.05, 30);
+
+        assertThat(strictEvaluator.evaluateLongEntry(entryKlines, contextKlines)).isEmpty();
+    }
+
+    @Test
+    void shouldRejectLongSignalWhen4hBandwidthIsNotExpanding() {
+        BollingerSignalEvaluator strictEvaluator = evaluator();
+        ReflectionTestUtils.setField(strictEvaluator, "contextBandwidthLookbackBars", 3);
+        ReflectionTestUtils.setField(strictEvaluator, "contextMinBandwidthExpansionPct", new BigDecimal("0.1000"));
+
+        List<BinanceKlineDTO> entryKlines = trendingKlines("1m", 100.0, 0.10, 30);
+        List<BinanceKlineDTO> contextKlines = trendingKlines("4h", 100.0, 0.12, 30);
+
+        assertThat(strictEvaluator.evaluateLongEntry(entryKlines, contextKlines)).isEmpty();
+    }
+
+    @Test
+    void shouldCreateFastFailureExitWhen1mLosesMiddleQuickly() {
+        List<BinanceKlineDTO> entryKlines = new ArrayList<>(trendingKlines("1m", 100.0, 0.10, 29));
+        entryKlines.add(kline("1m", 102.70, 102.80, 101.00, 101.20, 29, 30));
+        List<BinanceKlineDTO> contextKlines = trendingKlines("4h", 100.0, 0.90, 30);
+
+        AlertSignal signal = evaluator.evaluateLongExit(
+                entryKlines,
+                contextKlines,
+                new BigDecimal("102.90"),
+                new BigDecimal("92.61"),
+                3
+        ).orElse(null);
+
+        assertThat(signal).isNotNull();
+        assertThat(signal.getType()).isEqualTo("EXIT_BOLLINGER_FAST_FAILURE_LONG");
+        assertThat(signal.getReferenceEntryPrice()).isEqualTo(new BigDecimal("102.90"));
+    }
+
     private BollingerSignalEvaluator evaluator() {
         BollingerSignalEvaluator signalEvaluator = new BollingerSignalEvaluator();
         ReflectionTestUtils.setField(signalEvaluator, "bollPeriod", 20);
         ReflectionTestUtils.setField(signalEvaluator, "stddevMultiplier", new BigDecimal("2.0"));
         ReflectionTestUtils.setField(signalEvaluator, "stopLossPct", new BigDecimal("0.10"));
         ReflectionTestUtils.setField(signalEvaluator, "entryVolumeLookback", 20);
+        ReflectionTestUtils.setField(signalEvaluator, "contextTrendLookbackBars", 3);
+        ReflectionTestUtils.setField(signalEvaluator, "contextMinMiddleRisePct", new BigDecimal("0.0020"));
+        ReflectionTestUtils.setField(signalEvaluator, "contextMinCloseBufferPct", new BigDecimal("0.0015"));
+        ReflectionTestUtils.setField(signalEvaluator, "contextBandwidthLookbackBars", 0);
+        ReflectionTestUtils.setField(signalEvaluator, "contextMinBandwidthExpansionPct", BigDecimal.ZERO);
+        ReflectionTestUtils.setField(signalEvaluator, "fastFailureMaxBars", 360);
+        ReflectionTestUtils.setField(signalEvaluator, "fastFailureLossPct", new BigDecimal("0.0035"));
         return signalEvaluator;
     }
 

@@ -48,14 +48,11 @@ public class BacktestExcelExportService {
     @Value("${backtest.export-excel.enabled:false}")
     private boolean exportEnabled;
 
-    @Value("${backtest.export-excel.path:}")
+    @Value("${backtest.export-excel.path:D:/backtest_result/}")
     private String exportPath;
 
     @Value("${backtest.export.initial-capital:10000}")
     private BigDecimal initialCapital;
-
-    @Value("${backtest.export.risk-per-trade:0.01}")
-    private BigDecimal riskPerTrade;
 
     @Value("${backtest.export.zone-id:Asia/Shanghai}")
     private String exportZoneId;
@@ -78,19 +75,20 @@ public class BacktestExcelExportService {
         try {
             Files.createDirectories(outputPath.getParent());
             try (Workbook workbook = new XSSFWorkbook();
-                 OutputStream outputStream = Files.newOutputStream(outputPath)) {
+                OutputStream outputStream = Files.newOutputStream(outputPath)) {
                 WorkbookStyles styles = new WorkbookStyles(workbook);
                 writeSummarySheet(workbook, styles, result, rawSimulation, policySimulation);
+                writeTradeSheet(workbook, styles, "Raw Trades", result.baseline(), rawSimulation);
+                writeTradeSheet(workbook, styles, "Policy Trades", result.policyFilteredBaseline(), policySimulation);
                 workbook.write(outputStream);
             }
         } catch (IOException e) {
             throw new IllegalStateException("Failed to export backtest workbook to " + outputPath, e);
         }
 
-        log.info("Backtest workbook exported, path={}, initialCapital={}, riskPerTrade={}%",
+        log.info("Backtest workbook exported, path={}, initialCapital={}",
                 outputPath,
-                scale(initialCapital),
-                percentValue(riskPerTrade));
+                scale(initialCapital));
         return Optional.of(new ExportOutcome(outputPath, rawSimulation, policySimulation));
     }
 
@@ -178,9 +176,9 @@ public class BacktestExcelExportService {
             writeCell(row, col++, trade.riskPerUnit(), styles.number());
             writeCell(row, col++, trade.maxHoldingBars(), styles.defaultCell());
             writeCell(row, col++, localizeExitReason(trade.exitReason()), styles.defaultCell());
-            writeCell(row, col++, trade.realizedR(), styles.number());
+            writeCell(row, col++, trade.realizedReturnRatio().multiply(ONE_HUNDRED), styles.percent());
             writeCell(row, col++, simulationRow.equityBefore(), styles.money());
-            writeCell(row, col++, simulationRow.riskCapital(), styles.money());
+            writeCell(row, col++, simulationRow.positionCapital(), styles.money());
             writeCell(row, col++, simulationRow.pnl(), styles.money());
             writeCell(row, col++, simulationRow.equityAfter(), styles.money());
             writeCell(row, col++, simulationRow.peakEquity(), styles.money());
@@ -233,12 +231,11 @@ public class BacktestExcelExportService {
         BigDecimal peak = equity;
         BigDecimal maxDrawdownAmount = ZERO;
         BigDecimal maxDrawdownPct = ZERO;
-        BigDecimal effectiveRiskPerTrade = riskPerTrade.max(ZERO);
 
         for (TradeRecord trade : report.trades()) {
             BigDecimal equityBefore = equity;
-            BigDecimal riskCapital = equityBefore.multiply(effectiveRiskPerTrade);
-            BigDecimal pnl = riskCapital.multiply(trade.realizedR());
+            BigDecimal positionCapital = equityBefore;
+            BigDecimal pnl = trade.realizedPnl(positionCapital);
             BigDecimal equityAfter = equityBefore.add(pnl);
             if (equityAfter.compareTo(peak) > 0) {
                 peak = equityAfter;
@@ -255,7 +252,7 @@ public class BacktestExcelExportService {
             }
             rows.add(new TradeSimulationRow(
                     equityBefore,
-                    riskCapital,
+                    positionCapital,
                     pnl,
                     equityAfter,
                     peak,
@@ -274,18 +271,36 @@ public class BacktestExcelExportService {
 
     private Path resolveOutputPath(BacktestConfig config) {
         if (exportPath != null && !exportPath.isBlank()) {
-            Path path = Paths.get(exportPath.trim());
-            if (!path.isAbsolute()) {
-                return Path.of("").toAbsolutePath().resolve(path).normalize();
-            }
-            return path.normalize();
+            return resolveConfiguredOutputPath(config, exportPath.trim());
         }
 
+        return resolveConfiguredOutputPath(config, "D:/backtest_result/");
+    }
+
+    private Path resolveConfiguredOutputPath(BacktestConfig config, String configuredPath) {
+        Path path = Paths.get(configuredPath);
+        Path resolvedPath = path.isAbsolute()
+                ? path.normalize()
+                : Path.of("").toAbsolutePath().resolve(path).normalize();
+        if (looksLikeDirectoryPath(configuredPath)) {
+            return resolvedPath.resolve(defaultFilename(config)).normalize();
+        }
+        return resolvedPath;
+    }
+
+    private boolean looksLikeDirectoryPath(String configuredPath) {
+        if (configuredPath.endsWith("/") || configuredPath.endsWith("\\")) {
+            return true;
+        }
+        Path fileName = Paths.get(configuredPath).getFileName();
+        return fileName == null || !fileName.toString().contains(".");
+    }
+
+    private String defaultFilename(BacktestConfig config) {
         ZoneId zoneId = resolveZoneId();
         String safeProfile = sanitizeFilename(strategyMetadata.id());
-        String fileName = "backtest-" + safeProfile + "-" + config.interval() + "-"
+        return "backtest-" + safeProfile + "-" + config.interval() + "-"
                 + FILE_TIME_FORMATTER.format(ZonedDateTime.now(zoneId)) + ".xlsx";
-        return Path.of("target", "backtest", fileName).toAbsolutePath().normalize();
     }
 
     private String profileSummary() {
@@ -446,7 +461,7 @@ public class BacktestExcelExportService {
     }
 
     public record TradeSimulationRow(BigDecimal equityBefore,
-                                     BigDecimal riskCapital,
+                                     BigDecimal positionCapital,
                                      BigDecimal pnl,
                                      BigDecimal equityAfter,
                                      BigDecimal peakEquity,

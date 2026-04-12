@@ -72,4 +72,21 @@ public record TradeRecord(String signalType,
                 : entryPrice.subtract(exitPrice);
         return pnl.divide(riskPerUnit, 8, RoundingMode.HALF_UP);
     }
+
+    public BigDecimal realizedReturnRatio() {
+        if (exitPrice == null || entryPrice == null || entryPrice.compareTo(ZERO) == 0) {
+            return ZERO;
+        }
+        BigDecimal pnl = direction == TradeDirection.LONG
+                ? exitPrice.subtract(entryPrice)
+                : entryPrice.subtract(exitPrice);
+        return pnl.divide(entryPrice, 8, RoundingMode.HALF_UP);
+    }
+
+    public BigDecimal realizedPnl(BigDecimal positionCapital) {
+        if (positionCapital == null) {
+            return ZERO;
+        }
+        return positionCapital.multiply(realizedReturnRatio()).setScale(8, RoundingMode.HALF_UP);
+    }
 }

@@ -23,7 +23,7 @@ import static org.mockito.Mockito.when;
 class BollingerExecutionProcessorTests {
 
     @Test
-    void shouldSendEntryAndThenStopExit() {
+    void shouldSendEntryThenStopExitAndRespectCooldown() {
         BinanceApi binanceApi = mock(BinanceApi.class);
         AlertNotificationService notificationService = mock(AlertNotificationService.class);
         BollingerSignalEvaluator evaluator = new BollingerSignalEvaluator();
@@ -31,6 +31,13 @@ class BollingerExecutionProcessorTests {
         ReflectionTestUtils.setField(evaluator, "stddevMultiplier", new BigDecimal("2.0"));
         ReflectionTestUtils.setField(evaluator, "stopLossPct", new BigDecimal("0.10"));
         ReflectionTestUtils.setField(evaluator, "entryVolumeLookback", 20);
+        ReflectionTestUtils.setField(evaluator, "contextTrendLookbackBars", 3);
+        ReflectionTestUtils.setField(evaluator, "contextMinMiddleRisePct", new BigDecimal("0.0020"));
+        ReflectionTestUtils.setField(evaluator, "contextMinCloseBufferPct", new BigDecimal("0.0015"));
+        ReflectionTestUtils.setField(evaluator, "contextBandwidthLookbackBars", 0);
+        ReflectionTestUtils.setField(evaluator, "contextMinBandwidthExpansionPct", BigDecimal.ZERO);
+        ReflectionTestUtils.setField(evaluator, "fastFailureMaxBars", 360);
+        ReflectionTestUtils.setField(evaluator, "fastFailureLossPct", new BigDecimal("0.0035"));
 
         BollingerExecutionProcessor processor = new BollingerExecutionProcessor(binanceApi, evaluator, notificationService);
         ReflectionTestUtils.setField(processor, "targetSymbol", "BTCUSDT");
@@ -38,6 +45,8 @@ class BollingerExecutionProcessorTests {
         ReflectionTestUtils.setField(processor, "contextInterval", "4h");
         ReflectionTestUtils.setField(processor, "entryKlineLimit", 240);
         ReflectionTestUtils.setField(processor, "contextKlineLimit", 80);
+        ReflectionTestUtils.setField(processor, "reentryCooldownBars", 240);
+        ReflectionTestUtils.setField(processor, "maxEntriesPerContextBar", 1);
 
         List<BinanceKlineDTO> entryKlines = rawKlines(entryClosedBars(), kline("1m", 102.80, 103.00, 102.70, 102.90, 30, 31));
         List<BinanceKlineDTO> contextKlines = rawKlines(contextClosedBars(), kline("4h", 126.90, 127.20, 126.70, 127.00, 30, 31));
@@ -49,6 +58,9 @@ class BollingerExecutionProcessorTests {
         processor.process("BTCUSDT");
 
         entryKlines.set(entryKlines.size() - 1, kline("1m", 92.40, 92.60, 91.80, 92.10, 31, 32));
+        processor.process("BTCUSDT");
+
+        entryKlines.set(entryKlines.size() - 1, kline("1m", 102.80, 103.00, 102.70, 102.90, 32, 33));
         processor.process("BTCUSDT");
 
         ArgumentCaptor<AlertSignal> signalCaptor = ArgumentCaptor.forClass(AlertSignal.class);

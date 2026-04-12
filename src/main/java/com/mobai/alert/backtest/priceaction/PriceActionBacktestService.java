@@ -2,6 +2,7 @@ package com.mobai.alert.backtest.priceaction;
 
 import com.mobai.alert.access.BinanceApi;
 import com.mobai.alert.access.kline.dto.BinanceKlineDTO;
+import com.mobai.alert.access.kline.service.AccessKlineBarHistoryService;
 import com.mobai.alert.backtest.BacktestStrategyRunner;
 import com.mobai.alert.backtest.model.BacktestConfig;
 import com.mobai.alert.backtest.model.BacktestReport;
@@ -25,6 +26,7 @@ import com.mobai.alert.strategy.priceaction.shared.MultiTimeframeDefaults;
 import com.mobai.alert.strategy.priceaction.shared.StrategySupport;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Service;
@@ -36,7 +38,6 @@ import java.math.RoundingMode;
 import java.time.Instant;
 import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
-import java.util.Comparator;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -60,9 +61,6 @@ public class PriceActionBacktestService implements BacktestStrategyRunner {
     private static final long ONE_HOUR_MS = 60L * 60L * 1000L;
     private static final long FOUR_HOURS_MS = 4L * 60L * 60L * 1000L;
     private static final long ONE_DAY_MS = 24L * 60L * 60L * 1000L;
-    private static final int PAGE_LIMIT = 1000;
-
-    private final BinanceApi binanceApi;
 
     @Value("${backtest.symbol:BTCUSDT}")
     private String backtestSymbol;
@@ -228,15 +226,24 @@ public class PriceActionBacktestService implements BacktestStrategyRunner {
     private final BacktestFeatureSnapshotService backtestFeatureSnapshotService;
     private final CompositeFactorSignalPolicy compositeFactorSignalPolicy;
     private final MarketStateMachine marketStateMachine;
+    private final AccessKlineBarHistoryService klineHistoryService;
 
-    public PriceActionBacktestService(BinanceApi binanceApi,
-                                   BacktestFeatureSnapshotService backtestFeatureSnapshotService,
-                                   CompositeFactorSignalPolicy compositeFactorSignalPolicy,
-                                   MarketStateMachine marketStateMachine) {
-        this.binanceApi = binanceApi;
+    @Autowired
+    public PriceActionBacktestService(BacktestFeatureSnapshotService backtestFeatureSnapshotService,
+                                      CompositeFactorSignalPolicy compositeFactorSignalPolicy,
+                                      MarketStateMachine marketStateMachine,
+                                      AccessKlineBarHistoryService klineHistoryService) {
         this.backtestFeatureSnapshotService = backtestFeatureSnapshotService;
         this.compositeFactorSignalPolicy = compositeFactorSignalPolicy;
         this.marketStateMachine = marketStateMachine;
+        this.klineHistoryService = klineHistoryService;
+    }
+
+    PriceActionBacktestService(BinanceApi ignoredBinanceApi,
+                               BacktestFeatureSnapshotService backtestFeatureSnapshotService,
+                               CompositeFactorSignalPolicy compositeFactorSignalPolicy,
+                               MarketStateMachine marketStateMachine) {
+        this(backtestFeatureSnapshotService, compositeFactorSignalPolicy, marketStateMachine, null);
     }
 
     /**
@@ -1002,8 +1009,7 @@ public class PriceActionBacktestService implements BacktestStrategyRunner {
     private HigherTimeframeBacktestContext prepareHigherTimeframeBacktestContext(BacktestConfig config) {
         if (!isBacktestExecutionRole()
                 || !StringUtils.hasText(backtestContextInterval)
-                || backtestContextInterval.equalsIgnoreCase(config.interval())
-                || binanceApi == null) {
+                || backtestContextInterval.equalsIgnoreCase(config.interval())) {
             return HigherTimeframeBacktestContext.disabled();
         }
 
@@ -1060,46 +1066,24 @@ public class PriceActionBacktestService implements BacktestStrategyRunner {
      * 分页拉取历史 K 线，并按时间排序后返回。
      */
     private List<BinanceKlineDTO> loadHistoricalKlines(String symbol, String interval, long startTime, long endTime) {
-        List<BinanceKlineDTO> all = new ArrayList<>();
-        long cursor = startTime;
-        int pageCount = 0;
-        log.info("开始分页拉取历史K线，symbol={}，interval={}，start={}，end={}",
+        if (klineHistoryService == null) {
+            throw new IllegalStateException("Backtest kline history service is unavailable; access_kline_bar cannot be queried.");
+        }
+        log.info("开始从 access_kline_bar 读取历史K线，symbol={}，interval={}，start={}，end={}",
                 symbol,
                 interval,
                 Instant.ofEpochMilli(startTime),
                 Instant.ofEpochMilli(endTime));
-
-        while (cursor < endTime) {
-            BinanceKlineDTO request = new BinanceKlineDTO();
-            request.setSymbol(symbol);
-            request.setInterval(interval);
-            request.setLimit(PAGE_LIMIT);
-            request.setStartTime(cursor);
-            request.setEndTime(endTime);
-
-            List<BinanceKlineDTO> page = binanceApi.listKline(request);
-            if (page.isEmpty()) {
-                log.warn("历史K线分页拉取返回空结果，提前结束，cursor={}", Instant.ofEpochMilli(cursor));
-                break;
-            }
-
-            all.addAll(page);
-            pageCount++;
-            long nextCursor = page.get(page.size() - 1).getStartTime() + intervalMs(interval);
-            if (nextCursor <= cursor) {
-                log.warn("历史K线分页游标未向前推进，提前结束，cursor={}，nextCursor={}", cursor, nextCursor);
-                break;
-            }
-            cursor = nextCursor;
-            if (page.size() < PAGE_LIMIT) {
-                break;
-            }
+        List<BinanceKlineDTO> history = klineHistoryService.loadClosedKlines(symbol, interval, startTime, endTime);
+        if (history.isEmpty()) {
+            throw new IllegalStateException("No backtest klines found in access_kline_bar for symbol="
+                    + symbol + ", interval=" + interval + ", startTime=" + startTime + ", endTime=" + endTime);
         }
-
-        log.info("历史K线分页拉取完成，symbol={}，总页数={}，总K线数量={}", symbol, pageCount, all.size());
-        return all.stream()
-                .sorted(Comparator.comparingLong(BinanceKlineDTO::getStartTime))
-                .collect(Collectors.toList());
+        log.info("历史K线读取完成，来源=access_kline_bar，symbol={}，interval={}，总K线数量={}",
+                symbol,
+                interval,
+                history.size());
+        return history;
     }
 
     /**

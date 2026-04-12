@@ -40,10 +40,22 @@ public final class BollingerSupport {
     public static BollingerBandLevels calculateBands(List<BinanceKlineDTO> closedKlines,
                                                      int period,
                                                      BigDecimal stddevMultiplier) {
+        return calculateBandsAtOffset(closedKlines, period, stddevMultiplier, 0);
+    }
+
+    public static BollingerBandLevels calculateBandsAtOffset(List<BinanceKlineDTO> closedKlines,
+                                                             int period,
+                                                             BigDecimal stddevMultiplier,
+                                                             int endOffsetBars) {
         if (CollectionUtils.isEmpty(closedKlines) || closedKlines.size() < period) {
             return null;
         }
-        List<BinanceKlineDTO> window = closedKlines.subList(closedKlines.size() - period, closedKlines.size());
+        int normalizedOffset = Math.max(0, endOffsetBars);
+        if (closedKlines.size() < period + normalizedOffset) {
+            return null;
+        }
+        int toIndex = closedKlines.size() - normalizedOffset;
+        List<BinanceKlineDTO> window = closedKlines.subList(toIndex - period, toIndex);
         BigDecimal sum = ZERO;
         for (BinanceKlineDTO kline : window) {
             sum = sum.add(valueOf(kline.getClose()));
@@ -80,6 +92,13 @@ public final class BollingerSupport {
             return null;
         }
         return valueOf(last(closedKlines).getVolume()).divide(average, 8, RoundingMode.HALF_UP);
+    }
+
+    public static BigDecimal ratio(BigDecimal numerator, BigDecimal denominator) {
+        if (numerator == null || denominator == null || denominator.compareTo(ZERO) == 0) {
+            return ZERO;
+        }
+        return numerator.divide(denominator, 8, RoundingMode.HALF_UP);
     }
 
     public static long resolveIntervalMs(String interval) {

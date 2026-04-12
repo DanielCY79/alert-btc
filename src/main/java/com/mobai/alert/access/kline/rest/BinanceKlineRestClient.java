@@ -18,9 +18,7 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * Binance K 线 REST 客户端。
- * 负责直接访问 Binance Futures HTTP 接口，拉取历史 K 线和交易对元数据。
- * 这是 WebSocket 缓存失效或启动预热时的兜底数据来源。
+ * Binance kline REST client.
  */
 @Component
 public class BinanceKlineRestClient {
@@ -39,9 +37,6 @@ public class BinanceKlineRestClient {
         this.restTemplate = restTemplate;
     }
 
-    /**
-     * 通过查询 BTCUSDT 最新价格验证 REST 连通性。
-     */
     public void testTime() {
         HttpHeaders headers = new HttpHeaders();
         headers.set("X-MBX-APIKEY", apiKey);
@@ -56,21 +51,45 @@ public class BinanceKlineRestClient {
 
         try {
             var jsonObject = JSON.parseObject(response.getBody());
-            log.info("Binance 最新价格查询成功，symbol={}，price={}",
+            log.info("Binance latest price query succeeded, symbol={}, price={}",
                     jsonObject.getString("symbol"),
                     jsonObject.getString("price"));
         } catch (Exception e) {
-            log.error("解析 Binance 最新价格响应失败", e);
+            log.error("Failed to parse Binance latest price response", e);
         }
     }
 
-    /**
-     * 通过 REST 接口拉取 K 线数据。
-     *
-     * @param reqDTO 查询参数
-     * @return 标准化后的 K 线列表
-     */
     public List<BinanceKlineDTO> listKline(BinanceKlineDTO reqDTO) {
+        try {
+            return doListKline(reqDTO);
+        } catch (Exception e) {
+            log.error("Binance kline query failed, symbol={}, interval={}, limit={}, startTime={}, endTime={}",
+                    reqDTO.getSymbol(),
+                    reqDTO.getInterval(),
+                    reqDTO.getLimit(),
+                    reqDTO.getStartTime(),
+                    reqDTO.getEndTime(),
+                    e);
+            return List.of();
+        }
+    }
+
+    public List<BinanceKlineDTO> listKlineStrict(BinanceKlineDTO reqDTO) {
+        try {
+            return doListKline(reqDTO);
+        } catch (Exception e) {
+            log.error("Strict Binance kline query failed, symbol={}, interval={}, limit={}, startTime={}, endTime={}",
+                    reqDTO.getSymbol(),
+                    reqDTO.getInterval(),
+                    reqDTO.getLimit(),
+                    reqDTO.getStartTime(),
+                    reqDTO.getEndTime(),
+                    e);
+            throw new IllegalStateException("Failed to fetch Binance klines", e);
+        }
+    }
+
+    private List<BinanceKlineDTO> doListKline(BinanceKlineDTO reqDTO) {
         HttpHeaders headers = new HttpHeaders();
         headers.set("X-MBX-APIKEY", apiKey);
         HttpEntity<String> entity = new HttpEntity<>(headers);
@@ -90,23 +109,12 @@ public class BinanceKlineRestClient {
             urlBuilder.append("&timeZone=").append(reqDTO.getTimeZone());
         }
 
-        List<BinanceKlineDTO> klines = new ArrayList<>();
-        try {
-            ResponseEntity<String> response = restTemplate.exchange(urlBuilder.toString(), HttpMethod.GET, entity, String.class);
-            JSONArray rows = JSON.parseArray(response.getBody());
-            for (Object row : rows) {
-                klines.add(BinanceKlineMapper.fromRestRow(reqDTO.getSymbol(), reqDTO.getInterval(), JSON.parseArray(row.toString())));
-            }
-        } catch (Exception e) {
-            log.error("拉取 Binance K 线失败，symbol={}，interval={}，limit={}，startTime={}，endTime={}",
-                    reqDTO.getSymbol(),
-                    reqDTO.getInterval(),
-                    reqDTO.getLimit(),
-                    reqDTO.getStartTime(),
-                    reqDTO.getEndTime(),
-                    e);
+        ResponseEntity<String> response = restTemplate.exchange(urlBuilder.toString(), HttpMethod.GET, entity, String.class);
+        JSONArray rows = JSON.parseArray(response.getBody());
+        List<BinanceKlineDTO> klines = new ArrayList<>(rows.size());
+        for (Object row : rows) {
+            klines.add(BinanceKlineMapper.fromRestRow(reqDTO.getSymbol(), reqDTO.getInterval(), JSON.parseArray(row.toString())));
         }
-
         return klines;
     }
 }
