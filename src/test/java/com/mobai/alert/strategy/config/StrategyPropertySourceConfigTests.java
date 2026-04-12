@@ -25,4 +25,16 @@ class StrategyPropertySourceConfigTests {
                 .run(context -> assertThat(context.getEnvironment().getProperty("monitoring.strategy.breakout.close-buffer"))
                         .isEqualTo("0.003"));
     }
+
+    @Test
+    void shouldLoadBollingerDefaultsFromStrategyConfig() {
+        contextRunner
+                .withPropertyValues("monitoring.strategy.type=bollinger")
+                .run(context -> {
+                    assertThat(context.getEnvironment().getProperty("monitoring.strategy.boll.entry-interval"))
+                            .isEqualTo("1m");
+                    assertThat(context.getEnvironment().getProperty("monitoring.strategy.default-id"))
+                            .isEqualTo("bollinger-1m-4h");
+                });
+    }
 }
