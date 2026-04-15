@@ -299,22 +299,33 @@ public class CompositeFactorSignalPolicy {
         return signal.getType() != null && signal.getType().startsWith("RANGE_FAILURE");
     }
 
+    private boolean isProbe(AlertSignal signal) {
+        return signal.getType() != null && signal.getType().startsWith("PROBE_TREND");
+    }
+
+    private boolean isProfit(AlertSignal signal) {
+        return signal.getType() != null && signal.getType().startsWith("PROFIT_TREND");
+    }
+
     private boolean isBreakout(AlertSignal signal) {
-        return signal.getType() != null && signal.getType().startsWith("CONFIRMED_BREAKOUT");
+        return signal.getType() != null
+                && (signal.getType().startsWith("CONFIRMED_BREAKOUT") || isProbe(signal));
     }
 
     private boolean isPullback(AlertSignal signal) {
         return signal.getType() != null
-                && (signal.getType().startsWith("BREAKOUT_PULLBACK") || signal.getType().startsWith("SECOND_ENTRY"));
+                && (signal.getType().startsWith("BREAKOUT_PULLBACK")
+                || signal.getType().startsWith("SECOND_ENTRY")
+                || isProfit(signal));
     }
 
     private boolean isCompatibleWithMarketState(AlertSignal signal, MarketState marketState) {
         return switch (marketState) {
             case UNKNOWN -> true;
-            case RANGE -> isRangeFailure(signal) || isBreakout(signal);
-            case BREAKOUT -> isBreakout(signal) || isPullback(signal);
-            case PULLBACK -> isPullback(signal);
-            case TREND -> isPullback(signal);
+            case RANGE -> isRangeFailure(signal) || isProbe(signal);
+            case BREAKOUT -> isProbe(signal) || isProfit(signal);
+            case PULLBACK -> isProfit(signal);
+            case TREND -> isProfit(signal);
         };
     }
 
@@ -330,9 +341,15 @@ public class CompositeFactorSignalPolicy {
             if (signal.getType() != null && signal.getType().startsWith("SECOND_ENTRY")) {
                 return "二次入场";
             }
+            if (isProfit(signal)) {
+                return "利润层续势";
+            }
             return "突破回踩";
         }
         if (isBreakout(signal)) {
+            if (isProbe(signal)) {
+                return "试错层扩张";
+            }
             return "确认突破";
         }
         return "该信号";
@@ -398,7 +415,7 @@ public class CompositeFactorSignalPolicy {
             return true;
         }
         if (contextState == MarketState.RANGE) {
-            return isRangeFailure(signal);
+            return isRangeFailure(signal) || isProbe(signal);
         }
         if (isRangeFailure(signal)) {
             return false;

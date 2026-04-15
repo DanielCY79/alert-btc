@@ -164,6 +164,48 @@ public class PriceActionBacktestService implements BacktestStrategyRunner {
     @Value("${monitoring.strategy.second-entry.invalidation-buffer:0.001}")
     private BigDecimal secondEntryInvalidationBuffer = new BigDecimal("0.001");
 
+    @Value("${monitoring.strategy.trend.bias-buffer:0.002}")
+    private BigDecimal trendBiasBuffer = new BigDecimal("0.002");
+
+    @Value("${monitoring.strategy.probe.stop-lookback:4}")
+    private int probeStopLookback = 4;
+
+    @Value("${monitoring.strategy.profit.pullback-lookback:4}")
+    private int profitPullbackLookback = 4;
+
+    @Value("${monitoring.strategy.profit.min-pullback-bars:1}")
+    private int profitMinPullbackBars = 1;
+
+    @Value("${monitoring.strategy.profit.min-retrace:0.18}")
+    private BigDecimal profitMinRetrace = new BigDecimal("0.18");
+
+    @Value("${monitoring.strategy.profit.max-retrace:0.55}")
+    private BigDecimal profitMaxRetrace = new BigDecimal("0.55");
+
+    @Value("${monitoring.strategy.profit.min-volume-ratio:0.90}")
+    private BigDecimal profitMinVolumeRatio = new BigDecimal("0.90");
+
+    @Value("${monitoring.strategy.profit.reclaim-buffer:0.001}")
+    private BigDecimal profitReclaimBuffer = new BigDecimal("0.001");
+
+    @Value("${monitoring.strategy.profit.min-body-ratio:0.12}")
+    private BigDecimal profitMinBodyRatio = new BigDecimal("0.12");
+
+    @Value("${monitoring.strategy.profit.min-close-location:0.50}")
+    private BigDecimal profitMinCloseLocation = new BigDecimal("0.50");
+
+    @Value("${monitoring.strategy.profit.max-extension:0.08}")
+    private BigDecimal profitMaxExtension = new BigDecimal("0.08");
+
+    @Value("${monitoring.strategy.profit.pullback-max-volume-ratio:1.35}")
+    private BigDecimal profitPullbackMaxVolumeRatio = new BigDecimal("1.35");
+
+    @Value("${monitoring.strategy.profit.ma-hold-buffer:0.015}")
+    private BigDecimal profitMaHoldBuffer = new BigDecimal("0.015");
+
+    @Value("${monitoring.strategy.profit.touch-tolerance:0.002}")
+    private BigDecimal profitTouchTolerance = new BigDecimal("0.002");
+
     @Value("${monitoring.strategy.breakout.record.ttl.ms:43200000}")
     private long breakoutRecordTtlMs;
 
@@ -221,6 +263,7 @@ public class PriceActionBacktestService implements BacktestStrategyRunner {
     @Value("${backtest.policy.missing-derivative-penalty:0.00}")
     private BigDecimal backtestMissingDerivativePenalty;
 
+    @Value("${backtest.context-interval:" + MultiTimeframeDefaults.CONTEXT_INTERVAL + "}")
     private String backtestContextInterval = MultiTimeframeDefaults.CONTEXT_INTERVAL;
 
     private final BacktestFeatureSnapshotService backtestFeatureSnapshotService;
@@ -511,7 +554,7 @@ public class PriceActionBacktestService implements BacktestStrategyRunner {
                                                CompositeFactorPolicyProfile policyProfile,
                                                SignalAudit audit) {
         Optional<AlertSignal> signal = qualifySignal(
-                evaluator.evaluateRangeFailedBreakdownLong(klines),
+                evaluator.evaluateProfitLong(klines),
                 featureSnapshot,
                 applyCompositePolicy,
                 policyProfile,
@@ -522,7 +565,7 @@ public class PriceActionBacktestService implements BacktestStrategyRunner {
         }
 
         signal = qualifySignal(
-                evaluator.evaluateRangeFailedBreakoutShort(klines),
+                evaluator.evaluateProfitShort(klines),
                 featureSnapshot,
                 applyCompositePolicy,
                 policyProfile,
@@ -532,109 +575,24 @@ public class PriceActionBacktestService implements BacktestStrategyRunner {
             return signal;
         }
 
-        BreakoutConfirmationResult confirmation = confirmBreakoutMemory(
-                "LONG",
-                "SHORT",
-                klines,
-                evaluator,
-                breakoutMemories,
+        signal = qualifySignal(
+                evaluator.evaluateProbeLong(klines),
                 featureSnapshot,
                 applyCompositePolicy,
                 policyProfile,
                 audit
         );
-        if (confirmation.confirmed()) {
-            return confirmation.signal();
+        if (signal.isPresent()) {
+            return signal;
         }
 
-        confirmation = confirmBreakoutMemory(
-                "SHORT",
-                "LONG",
-                klines,
-                evaluator,
-                breakoutMemories,
+        return qualifySignal(
+                evaluator.evaluateProbeShort(klines),
                 featureSnapshot,
                 applyCompositePolicy,
                 policyProfile,
                 audit
         );
-        if (confirmation.confirmed()) {
-            return confirmation.signal();
-        }
-
-        Optional<AlertSignal> breakoutCandidate = evaluator.evaluateTrendBreakout(klines);
-        if (breakoutCandidate.isPresent()) {
-            rememberBreakoutCandidate(breakoutMemories, "LONG", "SHORT", breakoutCandidate.get(), true);
-            return Optional.empty();
-        }
-
-        breakoutCandidate = evaluator.evaluateTrendBreakdown(klines);
-        if (breakoutCandidate.isPresent()) {
-            rememberBreakoutCandidate(breakoutMemories, "SHORT", "LONG", breakoutCandidate.get(), false);
-            return Optional.empty();
-        }
-
-        BreakoutMemory longMemory = activeConfirmedMemory(breakoutMemories, "LONG", klines, false);
-        if (longMemory != null) {
-            signal = qualifySignal(
-                    evaluator.evaluateBreakoutPullback(klines, longMemory.breakoutLevel(), longMemory.targetPrice(), true),
-                    featureSnapshot,
-                    applyCompositePolicy,
-                    policyProfile,
-                    audit
-            );
-            if (signal.isPresent()) {
-                return signal;
-            }
-        }
-
-        BreakoutMemory shortMemory = activeConfirmedMemory(breakoutMemories, "SHORT", klines, false);
-        if (shortMemory != null) {
-            signal = qualifySignal(
-                    evaluator.evaluateBreakoutPullback(klines, shortMemory.breakoutLevel(), shortMemory.targetPrice(), false),
-                    featureSnapshot,
-                    applyCompositePolicy,
-                    policyProfile,
-                    audit
-            );
-            if (signal.isPresent()) {
-                return signal;
-            }
-        }
-
-        if (supportsSecondEntry(featureSnapshot)) {
-            signal = qualifySignal(
-                    evaluator.evaluateSecondEntryLong(
-                            klines,
-                            longMemory == null ? null : longMemory.breakoutLevel(),
-                            longMemory == null ? null : longMemory.targetPrice()
-                    ),
-                    featureSnapshot,
-                    applyCompositePolicy,
-                    policyProfile,
-                    audit
-            );
-            if (signal.isPresent()) {
-                return signal;
-            }
-
-            signal = qualifySignal(
-                    evaluator.evaluateSecondEntryShort(
-                            klines,
-                            shortMemory == null ? null : shortMemory.breakoutLevel(),
-                            shortMemory == null ? null : shortMemory.targetPrice()
-                    ),
-                    featureSnapshot,
-                    applyCompositePolicy,
-                    policyProfile,
-                    audit
-            );
-            if (signal.isPresent()) {
-                return signal;
-            }
-        }
-
-        return Optional.empty();
     }
 
     private BreakoutConfirmationResult confirmBreakoutMemory(String key,
@@ -1053,11 +1011,11 @@ public class PriceActionBacktestService implements BacktestStrategyRunner {
      * 根据策略类型返回最大持仓 K 线数。
      */
     private int maxHoldingBars(String signalType, BacktestConfig config) {
-        if (signalType.startsWith("RANGE_FAILURE")) {
-            return config.rangeHoldingBars();
-        }
-        if (signalType.startsWith("BREAKOUT_PULLBACK") || signalType.startsWith("SECOND_ENTRY")) {
+        if (signalType.startsWith("PROFIT_TREND")) {
             return config.pullbackHoldingBars();
+        }
+        if (signalType.startsWith("PROBE_TREND")) {
+            return config.breakoutHoldingBars();
         }
         return config.breakoutHoldingBars();
     }
@@ -1093,34 +1051,35 @@ public class PriceActionBacktestService implements BacktestStrategyRunner {
         PriceActionSignalEvaluator evaluator = new PriceActionSignalEvaluator();
         setField(evaluator, "fastPeriod", config.fastPeriod());
         setField(evaluator, "slowPeriod", config.slowPeriod());
+        setField(evaluator, "trendBiasBuffer", trendBiasBuffer);
         setField(evaluator, "rangeLookback", config.rangeLookback());
-        setField(evaluator, "rangeMinWidth", config.rangeMinWidth());
-        setField(evaluator, "rangeMaxWidth", config.rangeMaxWidth());
-        setField(evaluator, "rangeEdgeTolerance", config.rangeEdgeTolerance());
-        setField(evaluator, "requiredEdgeTouches", config.requiredEdgeTouches());
-        setField(evaluator, "overlapThreshold", config.overlapThreshold());
-        setField(evaluator, "minOverlapBars", config.minOverlapBars());
-        setField(evaluator, "maFlatThreshold", config.maFlatThreshold());
         setField(evaluator, "breakoutCloseBuffer", config.breakoutCloseBuffer());
         setField(evaluator, "breakoutVolumeMultiplier", config.breakoutVolumeMultiplier());
         setField(evaluator, "breakoutBodyRatioThreshold", config.breakoutBodyRatioThreshold());
         setField(evaluator, "breakoutMaxExtension", config.breakoutMaxExtension());
         setField(evaluator, "breakoutFailureBuffer", config.breakoutFailureBuffer());
-        setField(evaluator, "failureProbeBuffer", config.failureProbeBuffer());
-        setField(evaluator, "failureReentryBuffer", config.failureReentryBuffer());
-        setField(evaluator, "failureMinWickBodyRatio", config.failureMinWickBodyRatio());
+        setField(evaluator, "probeStopLookback", probeStopLookback);
         setField(evaluator, "pullbackTouchTolerance", config.pullbackTouchTolerance());
         setField(evaluator, "pullbackHoldBuffer", config.pullbackHoldBuffer());
         setField(evaluator, "pullbackMaxVolumeRatio", config.pullbackMaxVolumeRatio());
-        setField(evaluator, "breakoutFollowThroughCloseBuffer", config.breakoutFollowThroughCloseBuffer());
-        setField(evaluator, "breakoutFollowThroughMinBodyRatio", config.breakoutFollowThroughMinBodyRatio());
         setField(evaluator, "breakoutFollowThroughMinCloseLocation", config.breakoutFollowThroughMinCloseLocation());
-        setField(evaluator, "breakoutFollowThroughMinVolumeRatio", config.breakoutFollowThroughMinVolumeRatio());
         setField(evaluator, "secondEntryLookback", secondEntryLookback);
         setField(evaluator, "secondEntryMinPullbackBars", secondEntryMinPullbackBars);
         setField(evaluator, "secondEntryMinBodyRatio", secondEntryMinBodyRatio);
         setField(evaluator, "secondEntryMinCloseLocation", secondEntryMinCloseLocation);
         setField(evaluator, "secondEntryInvalidationBuffer", secondEntryInvalidationBuffer);
+        setField(evaluator, "profitPullbackLookback", profitPullbackLookback);
+        setField(evaluator, "profitMinPullbackBars", profitMinPullbackBars);
+        setField(evaluator, "profitMinRetrace", profitMinRetrace);
+        setField(evaluator, "profitMaxRetrace", profitMaxRetrace);
+        setField(evaluator, "profitMinVolumeRatio", profitMinVolumeRatio);
+        setField(evaluator, "profitReclaimBuffer", profitReclaimBuffer);
+        setField(evaluator, "profitMinBodyRatio", profitMinBodyRatio);
+        setField(evaluator, "profitMinCloseLocation", profitMinCloseLocation);
+        setField(evaluator, "profitMaxExtension", profitMaxExtension);
+        setField(evaluator, "profitPullbackMaxVolumeRatio", profitPullbackMaxVolumeRatio);
+        setField(evaluator, "profitMaHoldBuffer", profitMaHoldBuffer);
+        setField(evaluator, "profitTouchTolerance", profitTouchTolerance);
         return evaluator;
     }
 
@@ -1570,9 +1529,8 @@ public class PriceActionBacktestService implements BacktestStrategyRunner {
         }
 
         private boolean isTrendContinuationSignal() {
-            return signalType.startsWith("CONFIRMED_BREAKOUT")
-                    || signalType.startsWith("BREAKOUT_PULLBACK")
-                    || signalType.startsWith("SECOND_ENTRY");
+            return signalType.startsWith("PROBE_TREND")
+                    || signalType.startsWith("PROFIT_TREND");
         }
 
         private static BigDecimal directionalPrice(BigDecimal entryPrice, BigDecimal distance, TradeDirection direction) {

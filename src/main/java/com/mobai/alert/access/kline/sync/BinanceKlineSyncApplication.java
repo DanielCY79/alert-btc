@@ -16,7 +16,7 @@ import org.springframework.boot.builder.SpringApplicationBuilder;
 })
 @MapperScan("com.mobai.alert.access.kline.persistence.mapper")
 public class BinanceKlineSyncApplication {
-
+    
     public static void main(String[] args) {
         new SpringApplicationBuilder(BinanceKlineSyncApplication.class)
                 .properties(

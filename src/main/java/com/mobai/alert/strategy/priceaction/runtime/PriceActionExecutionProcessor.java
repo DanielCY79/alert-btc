@@ -106,6 +106,27 @@ public class PriceActionExecutionProcessor implements StrategyExecutionProcessor
     @Value("${monitoring.position.pyramid.add-size:0.35}")
     private BigDecimal pyramidAddFraction;
 
+    @Value("${monitoring.position.probe.max-holding-bars:10}")
+    private int probeMaxHoldingBars;
+
+    @Value("${monitoring.position.probe.cooldown-bars:10}")
+    private int probeCooldownBars;
+
+    @Value("${monitoring.position.probe.scale-out.trigger-r:0.80}")
+    private BigDecimal probeScaleOutTriggerR;
+
+    @Value("${monitoring.position.probe.scale-out.fraction:0.70}")
+    private BigDecimal probeScaleOutFraction;
+
+    @Value("${monitoring.position.probe.trailing.activation-r:0.60}")
+    private BigDecimal probeTrailingActivationR;
+
+    @Value("${monitoring.position.probe.trailing.distance-r:0.60}")
+    private BigDecimal probeTrailingDistanceR;
+
+    @Value("${monitoring.position.profit.cooldown-bars:6}")
+    private int profitCooldownBars;
+
     private final BinanceApi binanceApi;
     private final PriceActionSignalEvaluator alertRuleEvaluator;
     private final AlertNotificationService alertNotificationService;
@@ -116,6 +137,7 @@ public class PriceActionExecutionProcessor implements StrategyExecutionProcessor
     private final Map<String, BreakoutRecord> breakoutRecords = new ConcurrentHashMap<>();
     private final Map<String, MarketState> marketStates = new ConcurrentHashMap<>();
     private final Map<String, RuntimePosition> activePositions = new ConcurrentHashMap<>();
+    private final Map<String, SignalCooldown> cooldownStates = new ConcurrentHashMap<>();
     private final Map<String, String> contextLogStates = new ConcurrentHashMap<>();
     private final Map<String, String> blockedSignalLogStates = new ConcurrentHashMap<>();
     private final Map<String, Long> contextWarmupReadyAt = new ConcurrentHashMap<>();
@@ -172,71 +194,27 @@ public class PriceActionExecutionProcessor implements StrategyExecutionProcessor
 
         FeatureSnapshot featureSnapshot = buildExecutionSnapshot(symbol, klines);
         logFeatureSnapshot(featureSnapshot);
-
-        if (sendIfPresent(alertRuleEvaluator.evaluateRangeFailedBreakdownLong(klines), featureSnapshot)) {
-            return;
-        }
-        if (sendIfPresent(alertRuleEvaluator.evaluateRangeFailedBreakoutShort(klines), featureSnapshot)) {
-            return;
-        }
-
-        if (confirmPendingBreakout(klines, longBreakoutKey(symbol), shortBreakoutKey(symbol), featureSnapshot)) {
-            return;
-        }
-        if (confirmPendingBreakout(klines, shortBreakoutKey(symbol), longBreakoutKey(symbol), featureSnapshot)) {
+        RuntimePosition activePosition = activePositions.get(symbol);
+        if (activePosition != null) {
+            if (activePosition.layer() == TradeLayer.PROBE) {
+                if (sendIfPresent(alertRuleEvaluator.evaluateProfitLong(klines), featureSnapshot)) {
+                    return;
+                }
+                sendIfPresent(alertRuleEvaluator.evaluateProfitShort(klines), featureSnapshot);
+            }
             return;
         }
 
-        boolean breakoutCaptured = alertRuleEvaluator.evaluateTrendBreakout(klines)
-                .map(signal -> rememberBreakoutCandidate(signal, longBreakoutKey(symbol), shortBreakoutKey(symbol), true))
-                .orElse(false);
-        if (breakoutCaptured) {
+        if (sendIfPresent(alertRuleEvaluator.evaluateProfitLong(klines), featureSnapshot)) {
             return;
         }
-
-        breakoutCaptured = alertRuleEvaluator.evaluateTrendBreakdown(klines)
-                .map(signal -> rememberBreakoutCandidate(signal, shortBreakoutKey(symbol), longBreakoutKey(symbol), false))
-                .orElse(false);
-        if (breakoutCaptured) {
+        if (sendIfPresent(alertRuleEvaluator.evaluateProfitShort(klines), featureSnapshot)) {
             return;
         }
-
-        BreakoutRecord longBreakout = activeConfirmedBreakout(klines, longBreakoutKey(symbol));
-        if (longBreakout != null
-                && sendIfPresent(
-                alertRuleEvaluator.evaluateBreakoutPullback(klines, longBreakout.breakoutLevel(), longBreakout.targetPrice(), true),
-                featureSnapshot)) {
+        if (sendIfPresent(alertRuleEvaluator.evaluateProbeLong(klines), featureSnapshot)) {
             return;
         }
-        if (supportsSecondEntry(featureSnapshot)
-                && sendIfPresent(
-                alertRuleEvaluator.evaluateSecondEntryLong(
-                        klines,
-                        longBreakout == null ? null : longBreakout.breakoutLevel(),
-                        longBreakout == null ? null : longBreakout.targetPrice()
-                ),
-                featureSnapshot)) {
-            return;
-        }
-
-        BreakoutRecord shortBreakout = activeConfirmedBreakout(klines, shortBreakoutKey(symbol));
-        if (shortBreakout != null
-                && sendIfPresent(
-                    alertRuleEvaluator.evaluateBreakoutPullback(klines, shortBreakout.breakoutLevel(), shortBreakout.targetPrice(), false),
-                    featureSnapshot
-            )) {
-            return;
-        }
-        if (supportsSecondEntry(featureSnapshot)) {
-            sendIfPresent(
-                    alertRuleEvaluator.evaluateSecondEntryShort(
-                            klines,
-                            shortBreakout == null ? null : shortBreakout.breakoutLevel(),
-                            shortBreakout == null ? null : shortBreakout.targetPrice()
-                    ),
-                    featureSnapshot
-            );
-        }
+        sendIfPresent(alertRuleEvaluator.evaluateProbeShort(klines), featureSnapshot);
     }
 
     @Override
@@ -296,11 +274,21 @@ public class PriceActionExecutionProcessor implements StrategyExecutionProcessor
         }
 
         AlertSignal rawSignal = signalOptional.get();
+        String symbol = rawSignal.getKline() == null ? null : rawSignal.getKline().getSymbol();
+        RuntimePosition activePosition = symbol == null ? null : activePositions.get(symbol);
+        if (!acceptsNewSignal(rawSignal, activePosition)) {
+            return false;
+        }
+        if (isCoolingDown(symbol, rawSignal)) {
+            log.info("Signal ignored by cooldown, symbol={}, signalType={}, direction={}",
+                    symbol,
+                    rawSignal.getType(),
+                    rawSignal.getDirection());
+            return false;
+        }
+
         SignalPolicyDecision decision = compositeFactorSignalPolicy.evaluate(rawSignal, featureSnapshot);
         if (!decision.allowed()) {
-            if (tryHandleBlockedCounterTrendSignal(rawSignal, decision, featureSnapshot)) {
-                return true;
-            }
             logBlockedSignal("策略信号", rawSignal, decision, featureSnapshot);
             return false;
         }
@@ -315,6 +303,7 @@ public class PriceActionExecutionProcessor implements StrategyExecutionProcessor
                 StrategySupport.scaleOrNull(signal.getContextScore()));
         alertNotificationService.send(signal);
         rememberManagedRuntimePosition(signal);
+        clearCooldown(symbol, signal.getDirection());
         return true;
     }
 
@@ -1126,6 +1115,7 @@ public class PriceActionExecutionProcessor implements StrategyExecutionProcessor
             RuntimeManagementEvent event = evaluateClosedRuntimeBar(symbol, klines, closedBar, activePosition);
             if (event.closePosition()) {
                 activePositions.remove(symbol);
+                armCooldownForClose(symbol, activePosition, event.signal(), closedBar.getEndTime());
                 sendRuntimeManagementSignal(symbol, activePosition, event.signal());
                 return true;
             }
@@ -1137,6 +1127,8 @@ public class PriceActionExecutionProcessor implements StrategyExecutionProcessor
         RuntimeManagementEvent liveEvent = evaluateLiveRuntimeBar(symbol, klines, StrategySupport.last(klines), activePosition);
         if (liveEvent.closePosition()) {
             activePositions.remove(symbol);
+            BinanceKlineDTO latestBar = StrategySupport.last(klines);
+            armCooldownForClose(symbol, activePosition, liveEvent.signal(), latestBar == null ? System.currentTimeMillis() : latestBar.getEndTime());
             sendRuntimeManagementSignal(symbol, activePosition, liveEvent.signal());
             return true;
         }
@@ -1229,6 +1221,11 @@ public class PriceActionExecutionProcessor implements StrategyExecutionProcessor
         if (isFailedFollowThrough(closedBar, activePosition, heldBars)) {
             return RuntimeManagementEvent.close(
                     buildManagedFailedFollowThroughExitSignal(symbol, klines, closedBar, activePosition, heldBars)
+            );
+        }
+        if (activePosition.maxHoldingBars() > 0 && heldBars >= activePosition.maxHoldingBars()) {
+            return RuntimeManagementEvent.close(
+                    buildTimeExitSignal(symbol, klines, closedBar, activePosition, heldBars)
             );
         }
 
@@ -1369,6 +1366,30 @@ public class PriceActionExecutionProcessor implements StrategyExecutionProcessor
                 summary,
                 StrategySupport.valueOf(latest.getClose()),
                 "FAILED_FOLLOW_THROUGH"
+        );
+    }
+
+    private AlertSignal buildTimeExitSignal(String symbol,
+                                            List<BinanceKlineDTO> klines,
+                                            BinanceKlineDTO latest,
+                                            RuntimePosition activePosition,
+                                            int heldBars) {
+        String summary = String.format(
+                "前序 %s 已持有 %d 根 K 线，超过当前 %s 的时间预算，先退出等待下一次更干净的结构。",
+                activePosition.signalType(),
+                heldBars,
+                activePosition.layer() == TradeLayer.PROBE ? "试错层" : "利润层"
+        );
+        return buildRuntimeManagementSignal(
+                symbol,
+                klines,
+                latest,
+                activePosition,
+                "EXIT_TIME_" + activePosition.direction().name(),
+                symbol + " 达到持仓时间上限",
+                summary,
+                StrategySupport.valueOf(latest.getClose()),
+                "TIME"
         );
     }
 
@@ -1597,10 +1618,12 @@ public class PriceActionExecutionProcessor implements StrategyExecutionProcessor
 
     private String buildPositionContext(RuntimePosition activePosition, String reasonTag, String extraContext) {
         String context = "entryType=" + activePosition.signalType()
+                + " | layer=" + activePosition.layer()
                 + " | entryPrice=" + StrategySupport.scaleOrNull(activePosition.entryPrice())
                 + " | initialStop=" + StrategySupport.scaleOrNull(activePosition.initialStopPrice())
                 + " | activeStop=" + StrategySupport.scaleOrNull(activePosition.stopPrice())
                 + " | remainingSize=" + StrategySupport.scaleOrNull(activePosition.remainingSize())
+                + " | maxHoldingBars=" + activePosition.maxHoldingBars()
                 + " | scaleOut=" + activePosition.scaleOutTaken()
                 + " | conflictReduced=" + activePosition.conflictReduced()
                 + " | conflictStopTightened=" + activePosition.conflictStopTightened()
@@ -1643,28 +1666,37 @@ public class PriceActionExecutionProcessor implements StrategyExecutionProcessor
         if (signal == null || signal.getKline() == null || signal.getKline().getSymbol() == null || !tracksRuntimePosition(signal)) {
             return;
         }
+        TradeLayer layer = deriveLayer(signal);
+        BigDecimal scaleOutTrigger = layer == TradeLayer.PROBE ? probeScaleOutTriggerR : scaleOutTriggerR;
+        BigDecimal scaleOutSize = layer == TradeLayer.PROBE ? probeScaleOutFraction : scaleOutFraction;
+        BigDecimal trailingActivation = layer == TradeLayer.PROBE ? probeTrailingActivationR : trailingActivationR;
+        BigDecimal trailingDistance = layer == TradeLayer.PROBE ? probeTrailingDistanceR : trailingDistanceR;
+        int maxHoldingBars = layer == TradeLayer.PROBE ? probeMaxHoldingBars : 0;
+        int maxAdds = layer == TradeLayer.PROBE ? 0 : pyramidMaxAdds;
+        BigDecimal addSize = layer == TradeLayer.PROBE ? BigDecimal.ZERO : pyramidAddFraction;
         activePositions.put(signal.getKline().getSymbol(), new RuntimePosition(
                 signal.getType(),
+                layer,
                 signal.getDirection(),
                 signal.getKline().getEndTime(),
                 signal.getTriggerPrice(),
                 signal.getInvalidationPrice(),
                 signal.getTargetPrice(),
-                scaleOutTriggerR,
-                scaleOutFraction,
-                trailingActivationR,
-                trailingDistanceR,
-                pyramidMaxAdds,
+                maxHoldingBars,
+                scaleOutTrigger,
+                scaleOutSize,
+                trailingActivation,
+                trailingDistance,
+                maxAdds,
                 pyramidTriggerR,
-                pyramidAddFraction
+                addSize
         ));
     }
 
     private boolean tracksRuntimePosition(AlertSignal signal) {
         return StringUtils.hasText(signal.getType())
-                && (signal.getType().startsWith("CONFIRMED_BREAKOUT")
-                || signal.getType().startsWith("BREAKOUT_PULLBACK")
-                || signal.getType().startsWith("SECOND_ENTRY"));
+                && (signal.getType().startsWith("PROBE_TREND")
+                || signal.getType().startsWith("PROFIT_TREND"));
     }
 
     private record RuntimeManagementEvent(AlertSignal signal, boolean closePosition, boolean scaleOutTriggered) {
@@ -1691,19 +1723,102 @@ public class PriceActionExecutionProcessor implements StrategyExecutionProcessor
         }
         activePositions.put(signal.getKline().getSymbol(), new RuntimePosition(
                 signal.getType(),
+                deriveLayer(signal),
                 signal.getDirection(),
                 signal.getKline().getEndTime(),
                 signal.getTriggerPrice(),
                 signal.getInvalidationPrice(),
-                signal.getTargetPrice()
+                signal.getTargetPrice(),
+                signal.getType() != null && signal.getType().startsWith("PROBE_TREND") ? probeMaxHoldingBars : 0,
+                probeScaleOutTriggerR,
+                probeScaleOutFraction,
+                probeTrailingActivationR,
+                probeTrailingDistanceR,
+                0,
+                pyramidTriggerR,
+                BigDecimal.ZERO
         ));
     }
 
     private boolean tracksFailedFollowThrough(AlertSignal signal) {
         return StringUtils.hasText(signal.getType())
-                && (signal.getType().startsWith("CONFIRMED_BREAKOUT")
-                || signal.getType().startsWith("BREAKOUT_PULLBACK")
-                || signal.getType().startsWith("SECOND_ENTRY"));
+                && (signal.getType().startsWith("PROBE_TREND")
+                || signal.getType().startsWith("PROFIT_TREND"));
+    }
+
+    private TradeLayer deriveLayer(AlertSignal signal) {
+        if (signal != null && signal.getType() != null && signal.getType().startsWith("PROBE_TREND")) {
+            return TradeLayer.PROBE;
+        }
+        return TradeLayer.PROFIT;
+    }
+
+    private boolean acceptsNewSignal(AlertSignal signal, RuntimePosition activePosition) {
+        if (signal == null || signal.getDirection() == null) {
+            return false;
+        }
+        if (activePosition == null || activePosition.direction() == null) {
+            return true;
+        }
+        if (activePosition.direction() != signal.getDirection()) {
+            return false;
+        }
+        return activePosition.layer() == TradeLayer.PROBE && deriveLayer(signal) == TradeLayer.PROFIT;
+    }
+
+    private boolean isCoolingDown(String symbol, AlertSignal signal) {
+        if (!StringUtils.hasText(symbol) || signal == null || signal.getDirection() == null) {
+            return false;
+        }
+        SignalCooldown cooldown = cooldownStates.get(symbol);
+        if (cooldown == null) {
+            return false;
+        }
+        long signalTime = signal.getKline() == null ? System.currentTimeMillis() : signal.getKline().getEndTime();
+        if (!cooldown.matches(signal.getDirection(), signalTime)) {
+            if (signalTime >= cooldown.untilBarEndTime()) {
+                cooldownStates.remove(symbol);
+            }
+            return false;
+        }
+        return true;
+    }
+
+    private void clearCooldown(String symbol, TradeDirection direction) {
+        if (!StringUtils.hasText(symbol) || direction == null) {
+            return;
+        }
+        SignalCooldown cooldown = cooldownStates.get(symbol);
+        if (cooldown != null && cooldown.direction() == direction) {
+            cooldownStates.remove(symbol);
+        }
+    }
+
+    private void armCooldownForClose(String symbol, RuntimePosition activePosition, AlertSignal signal, long referenceBarEndTime) {
+        if (!StringUtils.hasText(symbol) || activePosition == null || activePosition.direction() == null) {
+            return;
+        }
+        int cooldownBars = activePosition.layer() == TradeLayer.PROBE ? probeCooldownBars : profitCooldownBars;
+        if (cooldownBars <= 0) {
+            return;
+        }
+        long intervalMs = intervalMs(klineInterval);
+        long until = referenceBarEndTime + Math.max(1, cooldownBars) * intervalMs;
+        String reason = signal == null ? "EXIT" : signal.getType();
+        cooldownStates.put(symbol, new SignalCooldown(activePosition.direction(), until, reason));
+    }
+
+    private long intervalMs(String interval) {
+        return switch (interval) {
+            case "3m" -> 3L * 60 * 1000;
+            case "5m" -> 5L * 60 * 1000;
+            case "15m" -> 15L * 60 * 1000;
+            case "30m" -> 30L * 60 * 1000;
+            case "1h" -> 60L * 60 * 1000;
+            case "4h" -> 4L * 60 * 60 * 1000;
+            case "1d" -> 24L * 60 * 60 * 1000;
+            default -> 3L * 60 * 1000;
+        };
     }
 
     private boolean supportsSecondEntry(FeatureSnapshot featureSnapshot) {
@@ -1714,5 +1829,11 @@ public class PriceActionExecutionProcessor implements StrategyExecutionProcessor
             case UNKNOWN, BREAKOUT, PULLBACK, TREND -> true;
             case RANGE -> false;
         };
+    }
+
+    private record SignalCooldown(TradeDirection direction, long untilBarEndTime, String reason) {
+        private boolean matches(TradeDirection nextDirection, long signalTime) {
+            return nextDirection == direction && signalTime < untilBarEndTime;
+        }
     }
 }

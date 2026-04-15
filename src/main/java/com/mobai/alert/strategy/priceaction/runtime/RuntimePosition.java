@@ -10,12 +10,14 @@ public final class RuntimePosition {
     private static final BigDecimal ONE = BigDecimal.ONE;
 
     private final String signalType;
+    private final TradeLayer layer;
     private final TradeDirection direction;
     private final long signalTime;
     private final BigDecimal entryPrice;
     private final BigDecimal initialStopPrice;
     private final BigDecimal targetPrice;
     private final BigDecimal riskPerUnit;
+    private final int maxHoldingBars;
     private final BigDecimal scaleOutFraction;
     private final BigDecimal scaleOutPrice;
     private final BigDecimal trailingActivationPrice;
@@ -45,11 +47,13 @@ public final class RuntimePosition {
                            BigDecimal targetPrice) {
         this(
                 signalType,
+                TradeLayer.PROFIT,
                 direction,
                 signalTime,
                 entryPrice,
                 stopPrice,
                 targetPrice,
+                0,
                 ZERO,
                 ZERO,
                 ZERO,
@@ -61,11 +65,13 @@ public final class RuntimePosition {
     }
 
     public RuntimePosition(String signalType,
+                           TradeLayer layer,
                            TradeDirection direction,
                            long signalTime,
                            BigDecimal entryPrice,
                            BigDecimal stopPrice,
                            BigDecimal targetPrice,
+                           int maxHoldingBars,
                            BigDecimal scaleOutTriggerR,
                            BigDecimal scaleOutFraction,
                            BigDecimal trailingActivationR,
@@ -74,12 +80,14 @@ public final class RuntimePosition {
                            BigDecimal pyramidTriggerR,
                            BigDecimal pyramidAddFraction) {
         this.signalType = signalType;
+        this.layer = layer == null ? TradeLayer.PROFIT : layer;
         this.direction = direction;
         this.signalTime = signalTime;
         this.entryPrice = entryPrice;
         this.initialStopPrice = stopPrice;
         this.targetPrice = targetPrice;
         this.riskPerUnit = entryPrice == null || stopPrice == null ? ZERO : entryPrice.subtract(stopPrice).abs();
+        this.maxHoldingBars = Math.max(0, maxHoldingBars);
         this.scaleOutFraction = clampFraction(scaleOutFraction);
         this.scaleOutPrice = directionalPrice(entryPrice, this.riskPerUnit.multiply(nonNegative(scaleOutTriggerR)), direction);
         this.trailingActivationPrice = directionalPrice(entryPrice, this.riskPerUnit.multiply(nonNegative(trailingActivationR)), direction);
@@ -95,12 +103,48 @@ public final class RuntimePosition {
         this.closedBarsSinceEntry = 0;
     }
 
+    public RuntimePosition(String signalType,
+                           TradeDirection direction,
+                           long signalTime,
+                           BigDecimal entryPrice,
+                           BigDecimal stopPrice,
+                           BigDecimal targetPrice,
+                           BigDecimal scaleOutTriggerR,
+                           BigDecimal scaleOutFraction,
+                           BigDecimal trailingActivationR,
+                           BigDecimal trailingDistanceR,
+                           int pyramidMaxAdds,
+                           BigDecimal pyramidTriggerR,
+                           BigDecimal pyramidAddFraction) {
+        this(
+                signalType,
+                TradeLayer.PROFIT,
+                direction,
+                signalTime,
+                entryPrice,
+                stopPrice,
+                targetPrice,
+                0,
+                scaleOutTriggerR,
+                scaleOutFraction,
+                trailingActivationR,
+                trailingDistanceR,
+                pyramidMaxAdds,
+                pyramidTriggerR,
+                pyramidAddFraction
+        );
+    }
+
     public String signalType() {
         return signalType;
     }
 
     public TradeDirection direction() {
         return direction;
+    }
+
+    public TradeLayer layer() {
+        return layer;
     }
 
     public long signalTime() {
@@ -121,6 +165,10 @@ public final class RuntimePosition {
 
     public BigDecimal riskPerUnit() {
         return riskPerUnit;
+    }
+
+    public int maxHoldingBars() {
+        return maxHoldingBars;
     }
 
     public BigDecimal stopPrice() {
