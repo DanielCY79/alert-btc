@@ -11,7 +11,7 @@ public class KlineSyncProperties {
     private String exchange = "BINANCE";
     private String marketType = "USDT_PERPETUAL";
     private String symbol = "BTCUSDT";
-    private List<String> intervals = new ArrayList<>(List.of("1m", "3m", "15m", "1h", "4h", "1d"));
+    private List<String> intervals = new ArrayList<>(List.of("1m", "3m", "5m", "15m", "1h", "4h", "1d"));
     private int lookbackDays = 365;
     private int fetchLimit = 1000;
     private int writeBatchSize = 500;

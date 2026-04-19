@@ -9,6 +9,7 @@ public final class KlineIntervalSupport {
         return switch (intervalCode) {
             case "1m" -> 60_000L;
             case "3m" -> 3 * 60_000L;
+            case "5m" -> 5 * 60_000L;
             case "15m" -> 15 * 60_000L;
             case "1h" -> 60 * 60_000L;
             case "4h" -> 4 * 60 * 60_000L;

@@ -122,6 +122,36 @@ class BinanceKlineHistorySyncServiceTests {
         assertThat(requestCaptor.getValue().getStartTime()).isBetween(expectedLowerBound, expectedUpperBound);
     }
 
+    @Test
+    void shouldSupportFiveMinuteIntervalsWhenResumingFromCheckpoint() {
+        BinanceKlineRestClient restClient = mock(BinanceKlineRestClient.class);
+        AccessKlineBarJdbcRepository barRepository = mock(AccessKlineBarJdbcRepository.class);
+        AccessKlineSyncCheckpointRepository checkpointRepository = mock(AccessKlineSyncCheckpointRepository.class);
+        KlineSyncProperties properties = properties("5m");
+        BinanceKlineHistorySyncService service = new BinanceKlineHistorySyncService(
+                restClient,
+                barRepository,
+                checkpointRepository,
+                properties
+        );
+
+        long checkpointStart = System.currentTimeMillis() - Duration.ofMinutes(15).toMillis();
+        AccessKlineSyncCheckpointEntity checkpoint = new AccessKlineSyncCheckpointEntity();
+        checkpoint.setLastOpenTimeMs(checkpointStart);
+        when(checkpointRepository.getOrCreate("BINANCE", "USDT_PERPETUAL", "BTCUSDT", "5m"))
+                .thenReturn(checkpoint);
+        when(restClient.listKlineStrict(any(BinanceKlineDTO.class))).thenReturn(List.of());
+
+        service.syncRecentHistory();
+
+        ArgumentCaptor<BinanceKlineDTO> requestCaptor = ArgumentCaptor.forClass(BinanceKlineDTO.class);
+        verify(restClient).listKlineStrict(requestCaptor.capture());
+        assertThat(requestCaptor.getValue().getInterval()).isEqualTo("5m");
+        assertThat(requestCaptor.getValue().getStartTime()).isEqualTo(checkpointStart + Duration.ofMinutes(5).toMillis());
+        verify(checkpointRepository).markRunning(checkpoint);
+        verify(checkpointRepository).markSuccess(checkpoint);
+    }
+
     private KlineSyncProperties properties(String interval) {
         KlineSyncProperties properties = new KlineSyncProperties();
         properties.setExchange("BINANCE");
